@@ -1,4 +1,4 @@
-AI Selection
+AI Ranking
 
 ## Create and Activate a Virtual Environment (recommended)
 For Linux/Mac:

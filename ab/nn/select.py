@@ -639,6 +639,13 @@ def rank_frame(df, res, lam, grid, axes=("resource",)):
 
     out = out.reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
+    # a score in (0,1), higher is better, that does NOT move when other
+    # candidates are added or removed: it is built from this model's own
+    # (eps, t) and the price alone.  eps_eff = eps * prod_a t_a^lambda_a is
+    # the error the model effectively costs at that price, so
+    # score = 1/(1 + eps_eff) is monotone in sigma.
+    out["eps_eff"] = np.exp(-out["sigma"]) if lam is not None else np.nan
+    out["score"] = 1.0 / (1.0 + out["eps_eff"])
     out["margin_to_next"] = out["sigma"].diff(-1) if lam is not None else np.nan
     out["rank_low"] = lo if lo is not None else np.nan
     out["rank_high"] = hi if hi is not None else np.nan
@@ -653,7 +660,10 @@ def rank_frame(df, res, lam, grid, axes=("resource",)):
                    for n in out["name"]]
     drop = [c for c in ("_tier", "_ord", "eps") if c in out]
     drop += [c for c in out.columns if c.startswith("x__")]
-    return out.drop(columns=drop)
+    out = out.drop(columns=drop)
+    lead = ["name", "score", "rank", "accuracy"] + list(axes)
+    return out[[c for c in lead if c in out]
+               + [c for c in out.columns if c not in lead]]
 
 
 # ================================================================ select ====
@@ -663,32 +673,115 @@ WORSE = {"USABLE": 0, "UNVERIFIED": 1, "UNUSABLE": 2}
 def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
            rank=False, p_floor=0.05, name_col="name", acc_col="accuracy",
            res_col="resource"):
-    """DataFrame -> result dict.  Prints nothing, raises nothing.
+    """DataFrame in, result dict out.  Prints nothing, raises nothing.
 
     res_col may name ONE resource column or SEVERAL.  With several, one price
     is derived per axis from that axis's own marginal curve and the
     scalarisation is sigma = -ln eps - sum_a lambda_a ln t_a.  The interaction
     between axes is not fitted (Paper 2, F5): each axis is priced alone.
 
-    result["verdict"]["level"] is the WORST level across axes:
+    RETURNS a dict with these keys, in this order:
 
-      USABLE      every axis has a confirmed floor
-      UNVERIFIED  some axis could not be tested, or its knee is extrapolated
-      UNUSABLE    some axis has no floor, so its price does not exist
+    winner        dict, or None if no ranking could be made.
+                    name      the selected model
+                    score     its score (see SCORE below), higher is better
+                    sigma     its sigma in nats
+                    runner_up the second-placed model
+                    margin_nats     sigma gap to the runner-up
+                    robust    True if it wins at every rate in the interval
+                    winner_set      every model that wins somewhere in it
+                    resolved  False if it and the runner-up sit closer than
+                              ln 1.5 apart in log-resource
+                    max_kl_regret_in_interval
+                              worst cost in nats of picking it anyway
+    ranking       DataFrame, one row per candidate, winner first, or None
+                  unless rank=True.  Columns, in order: name, score, rank,
+                  accuracy, <each resource>, sigma, eps_eff, margin_to_next,
+                  rank_low, rank_high, rank_stable, optimal_from,
+                  optimal_to, note.
+                    score / eps_eff   see SCORE below
+                    rank_low/high     the rank range this model takes across
+                                      the whole rate interval; equal values
+                                      mean its position does not move
+                    optimal_from/to   the lambda range in which this model is
+                                      the envelope optimum (NaN if never)
+                    note              "dominated by X", "in a dent", or ""
+    status        "selected"   floor confirmed, the ranking is a trade-off
+                               ranking
+                  "unverified" the floor could not be tested; the ranking is
+                               a guess
+                  "no_floor"   the floor was rejected; no exchange rate
+                               exists and the ranking is resource order
+                  "no_rate"    fewer than 3 nondominated candidates
+                  "bad_input"  accuracy outside (0,1), or columns missing
+    verdict       dict: level ("USABLE" / "UNVERIFIED" / "UNUSABLE"), reason,
+                  p_value (the floor F-test p, None if untestable), F.
+                  Read this before the ranking: it says whether the ranking
+                  means anything.
+    n_candidates  how many rows survived validation
+    axes          the resource column names; axis is the first of them
+    alpha         the coverage level used for every interval
+    reason        why it refused, or None on a clean run
+    problems      rejected rows and why, empty when clean
+    prices        DataFrame, one row per axis: axis, lambda, lambda_low,
+                  lambda_high, alpha, eps_inf, floor_p, n_marginal, log_span,
+                  level, provenance, interval_from, reason
+    rate          dict: lambda (scalar for one axis, else per-axis dict),
+                  per_axis, lambda_low, lambda_high, coverage, interval_from
+                  ("bootstrap (N refits)" or "jacobian (n>=50)"),
+                  error_drop_per_doubling, derived_from, trustworthy
+    fit           the saturating and power-law fit numbers, floor F and p,
+                  AICc delta, knee, resolved nats.  One axis only
+    envelope      dict: pieces (DataFrame of name and the lambda range it
+                  owns), winners, dominated, in_a_dent.  None with several
+                  axes, where the envelope is not one-dimensional
+    price_free    DataFrame of (winner, loser) pairs that hold at EVERY
+                  price: the winner is no worse on accuracy and on every
+                  resource.  Needs no rate at all
+    front         names that survived the cull
+    scores        DataFrame of name and sigma for the front, sorted
+    axis_drop     DataFrame: per axis, its share of total cost and whether
+                  removing it changes the pick.  Several axes only
+    next          dict: the resource value at which an unmeasured model would
+                  matter most (the knee), and how far the nearest candidate
+                  is in e-folds.  One axis only
+    notes         caveats that applied to this run
+
+    SCORE
+
+      score = 1 / (1 + eps_eff),   eps_eff = eps * prod_a t_a ** lambda_a
+
+      eps_eff is the error the model effectively costs once its resources are
+      charged at the derived price, so eps_eff = exp(-sigma); score is just
+      that mapped into (0,1) with higher meaning better.
+
+      The point of it is that it is built from ONE model's own accuracy and
+      resources plus the price, and from nothing else.  Adding or removing
+      other candidates therefore cannot change it, while `rank` and any
+      normalisation over the candidate set (min-max, percentile) move as soon
+      as the set does.
+
+      Two things it is NOT invariant to.  Its level depends on the resource
+      UNIT, because sigma shifts by lambda*ln(unit): the same models in
+      seconds rather than milliseconds all score higher by the same constant,
+      so the ordering is untouched but the numbers are not comparable across
+      runs unless the unit is fixed.  It also depends on lambda, so only
+      compare scores computed at the same price.
     """
+
     cands, axes, bad = normalise(df, name_col, acc_col, res_col)
     multi = len(axes) > 1
-    res = {"axes": axes, "axis": axes[0] if axes else "resource",
-           "alpha": alpha, "status": "bad_input", "reason": None,
-           "problems": bad,
-           "candidates": cands[["name", "accuracy"] + axes]
-           if set(["name", "accuracy"] + axes) <= set(cands) else cands,
-           "verdict": None, "envelope": None,
+    res = {"winner": None, "ranking": None,
+           "status": "bad_input", "verdict": None,
+           "n_candidates": int(len(cands)),
+           "axes": axes, "axis": axes[0] if axes else "resource",
+           "alpha": alpha, "reason": None, "problems": bad,
+           "prices": None, "rate": None, "fit": None,
+           "envelope": None,
            "price_free": pd.DataFrame(columns=["winner", "loser"]),
-           "front": [], "prices": None, "fit": None, "rate": None,
+           "front": [],
            "scores": pd.DataFrame(columns=["name", "sigma"]),
-           "winner": None, "ranking": None, "next": None,
-           "axis_drop": None, "notes": []}
+           "axis_drop": None, "next": None, "notes": []}
 
     def verdict(level, reason, **extra):
         res["verdict"] = dict(level=level, reason=reason, **extra)
@@ -810,9 +903,12 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
         al = priced[a0]["alpha"] or 1.0
         rr = [kl_regret(c[a0], lam[a0], al) for c in corners]
         reg = max((v for v in rr if not math.isnan(v)), default=0.0)
-    res["winner"] = {"name": win, "runner_up": runner,
-                     "margin_nats": float(sc["sigma"].iloc[0]
-                                          - sc["sigma"].iloc[1]),
+    sig_w = float(sc["sigma"].iloc[0])
+    res["winner"] = {"name": win,
+                     "score": 1.0 / (1.0 + math.exp(-sig_w)),
+                     "sigma": sig_w,
+                     "runner_up": runner,
+                     "margin_nats": sig_w - float(sc["sigma"].iloc[1]),
                      "robust": len(wset) == 1, "winner_set": wset,
                      "max_kl_regret_in_interval": reg,
                      "log_resource_separation": sep,
@@ -886,7 +982,7 @@ def render(r, color=True):
                  + ", ".join(axes))
     else:
         L.append(f"\nENVELOPE ....... {len(e['winners'])} of "
-                 f"{len(r['candidates'])} can be optimal at SOME price  "
+                 f"{r['n_candidates']} can be optimal at SOME price  "
                  "[no rate needed]")
         for nm, lo, hi in zip(e["pieces"]["name"], e["pieces"]["lambda_from"],
                               e["pieces"]["lambda_to"]):
@@ -909,7 +1005,7 @@ def render(r, color=True):
         for w, l_ in zip(pf["winner"], pf["loser"]):
             L.append(f"  {w} beats {l_}")
     L.append(f"\nCULL ........... {len(r['front'])} of "
-             f"{len(r['candidates'])} nondominated")
+             f"{r['n_candidates']} nondominated")
 
     pr = r.get("prices")
     if multi and pr is not None:
@@ -993,7 +1089,8 @@ def render(r, color=True):
                   "winner first",
               f"    # {'name':<18}{'acc':>9}"
               + "".join(f"{a[:11]:>12}" for a in axes)
-              + f"{'sigma':>9}{'margin':>9}{'rank@int':>10}  note"]
+              + f"{'sigma':>9}{'score':>8}{'margin':>9}{'rank@int':>10}"
+                "  note"]
         for q in rk.itertuples(index=False):
             mg = "    --  " if pd.isna(q.margin_to_next) \
                 else f"{q.margin_to_next:+.4f}"
@@ -1001,9 +1098,17 @@ def render(r, color=True):
                   else f"{int(q.rank_low)}-{int(q.rank_high)}")
             cells = "".join(f"{getattr(q, a):>12g}" for a in axes)
             L.append(_green(f"  {q.rank:>3} {q.name:<18}{q.accuracy:>9.4f}"
-                            f"{cells}{q.sigma:>+9.4f}{mg:>9}"
+                            f"{cells}{q.sigma:>+9.4f}{q.score:>8.4f}{mg:>9}"
                             f"{rr:>10}  {q.note}", color))
-        L += ["  rank@int ..... the rank range this model takes across the "
+        L += ["  score ........ 1/(1 + eps*prod t^lambda), in (0,1), higher "
+              "is better.  It uses only",
+              "                 this model's own numbers, so it does NOT "
+              "change when other candidates",
+              "                 are added or removed -- unlike rank.  Its "
+              "level depends on the resource",
+              "                 UNIT (ms vs s shifts every score); its order "
+              "does not.",
+              "  rank@int ..... the rank range this model takes across the "
               "whole rate interval;",
               "                 a single number means the position does not "
               "move.  Models marked",
@@ -1069,14 +1174,14 @@ def render(r, color=True):
 
 
 # =================================================================== cli ====
-def main(argv=None):
+if __name__ == "__main__":
     ap = argparse.ArgumentParser(
         description="Select the best model from (accuracy, resource) alone.")
-    ap.add_argument("inputs", nargs="*", metavar="NAME,ACC,RES | FILE.csv",
+    ap.add_argument("inputs", nargs="*", metavar="NAME,ACC,P1[,P2,...]",
                     help="candidates given directly (anything containing a "
                          "comma) or a CSV path")
-    ap.add_argument("--model", action="append", metavar="N,ACC,RES",
-                    help="one candidate; equivalent to a bare NAME,ACC,RES")
+    ap.add_argument("--model", action="append", metavar="N,ACC,P1[,...]",
+                    help="one candidate; equivalent to a bare argument")
     ap.add_argument("--acc-col")
     ap.add_argument("--res-col", action="append", metavar="COL",
                     help="CSV resource column; repeat for several axes. "
@@ -1089,7 +1194,10 @@ def main(argv=None):
                          "problem)")
     ap.add_argument("--aicc-k", choices=("with-variance", "params-only"),
                     default="with-variance")
-    ap.add_argument("--boot", type=int, default=400)
+    ap.add_argument("--boot", type=int, default=400,
+                    help="max bootstrap refits; skipped automatically once "
+                         f"the marginal curve has {BOOT_SKIP_N}+ points, "
+                         "0 disables intervals")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--rank", action="store_true",
                     help="order ALL models winner to loser")
@@ -1099,40 +1207,41 @@ def main(argv=None):
                     help="plain text, no ANSI colour")
     ap.add_argument("--quiet", action="store_true",
                     help="suppress the text report")
-    a, unknown = ap.parse_known_args(argv)
+    args, unknown = ap.parse_known_args()
+
+    # argparse cannot take positionals interleaved after an option, so collect
+    # the leftovers too: any stray token with a comma is a candidate
     stray = [u for u in unknown if "," in u and not u.startswith("-")]
     rest = [u for u in unknown if u not in stray]
     if rest:
         ap.error("unrecognized arguments: " + " ".join(rest))
 
-    specs = [x for x in a.inputs if "," in x] + stray + list(a.model or [])
-    files = [x for x in a.inputs if "," not in x]
+    specs = [x for x in args.inputs if "," in x] + stray + list(args.model
+                                                               or [])
+    files = [x for x in args.inputs if "," not in x]
     if len(files) > 1:
         ap.error(f"give at most one CSV path, got {len(files)}: "
                  + ", ".join(files))
     if sum(bool(x) for x in (specs, files)) != 1:
-        ap.error("give exactly one of: candidates as NAME,ACC,RES arguments, "
-                 "or a CSV path")
+        ap.error("give exactly one of: candidates as NAME,ACC,P1[,P2,...] "
+                 "arguments, or a CSV path")
+
     try:
-        df = (frame_from_csv(files[0], a.name_col, a.acc_col, a.res_col)
-              if files else frame_from_specs(specs))
+        frame = (frame_from_csv(files[0], args.name_col, args.acc_col,
+                                args.res_col)
+                 if files else frame_from_specs(specs))
     except (OSError, ValueError, KeyError) as exc:
         print(f"input error: {exc}", file=sys.stderr)
-        return 2
+        sys.exit(2)
 
-    result = select(df, alpha=a.alpha, boot=a.boot, seed=a.seed,
-                    aicc_k=a.aicc_k, rank=a.rank or bool(a.out_csv),
-                    res_col=df.attrs.get("axes") or "resource")
-    if not a.quiet:
-        print(render(result, color=not a.no_color))
-    if a.out_csv and result["ranking"] is not None:
-        if a.out_csv == "-":
-            result["ranking"].to_csv(sys.stdout, index=False)
-        else:
-            result["ranking"].to_csv(a.out_csv, index=False)
-    return {"selected": 0, "unverified": 1, "no_floor": 1, "no_rate": 1,
-            "bad_input": 2}[result["status"]]
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    outcome = select(frame, alpha=args.alpha, boot=args.boot, seed=args.seed,
+                     aicc_k=args.aicc_k,
+                     rank=args.rank or bool(args.out_csv),
+                     res_col=frame.attrs.get("axes") or "resource")
+    if not args.quiet:
+        print(render(outcome, color=not args.no_color))
+    if args.out_csv and outcome["ranking"] is not None:
+        outcome["ranking"].to_csv(
+            sys.stdout if args.out_csv == "-" else args.out_csv, index=False)
+    sys.exit({"selected": 0, "unverified": 1, "no_floor": 1, "no_rate": 1,
+              "bad_input": 2}[outcome["status"]])
