@@ -12,7 +12,7 @@ EXAMPLES OF USE
 
 1. Three models, two numbers each -- the minimum case.
 
-   $ python3 example_general.py --axis ms \
+   $ python3 example_general.py \
          --model A,0.851,4 --model B,0.9253,9 --model D,0.90,30
 
    ENVELOPE ....... 2 of 3 can be optimal at SOME price  [no rate needed]
@@ -34,7 +34,7 @@ EXAMPLES OF USE
 
 2. A CSV, enough points, and the rate derived from the frontier itself.
 
-   $ python3 example_general.py front9.csv --axis inference_time_ms
+   $ python3 example_general.py front9.csv
 
    FIT ............ eps = eps_inf + c t^-alpha on ln eps, 9 points
      saturating ... eps_inf=0.0200971 c=0.902677 alpha=0.7999  RSS=0.0008993
@@ -61,8 +61,10 @@ EXAMPLES OF USE
 3. Columns that cannot be guessed, and a looser coverage level.
 
    $ python3 example_general.py models.csv \
-         --name-col model --acc-col top1 --res-col latency_ms \
-         --axis latency_ms --alpha 0.10
+         --name-col model --acc-col top1 --res-col latency_ms --alpha 0.10
+
+   The report labels the resource with the CSV's own column name, so --axis
+   is needed only to relabel it (e.g. --axis "latency (ms)").
 
 4. Reproducible bootstrap, or a faster/slower one.
 
@@ -123,7 +125,9 @@ LAM_HI = 1e6
 
 # ---------------------------------------------------------------- input ----
 def read_models(a):
-    out = []
+    """Returns (candidates, resource_label).  The label is the CSV's own
+    resource column name, so --axis is only needed to override it."""
+    out, label = [], None
     for spec in a.model or []:
         p = [s.strip() for s in spec.split(",")]
         if len(p) != 3:
@@ -147,8 +151,9 @@ def read_models(a):
             if r[ia].strip():
                 out.append({"name": r[inm].strip(), "acc": float(r[ia]),
                             "t": float(r[ir])})
+        label = rc
         print(f"  read '{ac}' as accuracy, '{rc}' as resource")
-    return out
+    return out, label
 
 
 # -------------------------------------------------------------- envelope ----
@@ -278,7 +283,10 @@ def main():
     ap.add_argument("csv", nargs="?")
     ap.add_argument("--model", action="append")
     ap.add_argument("--acc-col"); ap.add_argument("--res-col")
-    ap.add_argument("--name-col"); ap.add_argument("--axis", default="resource")
+    ap.add_argument("--name-col")
+    ap.add_argument("--axis", default=None,
+                    help="label for the resource in the report; defaults to "
+                         "the CSV's resource column name, else 'resource'")
     ap.add_argument("--alpha", type=float, default=0.05,
                     help="coverage level for the rate interval (convention, "
                          "not a quantity of the problem)")
@@ -288,7 +296,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
-    ms = read_models(a)
+    ms, found = read_models(a)
+    if a.axis is None:
+        a.axis = found or "resource"
     if not ms:
         sys.exit("no candidates: pass a CSV or --model name,accuracy,resource")
     bad = [m["name"] for m in ms if not 0 < m["acc"] < 1]
