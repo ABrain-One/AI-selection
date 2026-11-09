@@ -1,6 +1,6 @@
 # AI Ranking
 <sub><a href='https://pypi.python.org/pypi/nn-rank'><img src='https://img.shields.io/pypi/v/nn-rank.svg'/></a> <a href="https://pepy.tech/project/nn-rank"><img alt="NN Ranking" src="https://static.pepy.tech/badge/nn-rank"></a><br/>
-short alias <a href='https://pypi.python.org/pypi/lrank'>lrank</a> 
+alias <a href='https://pypi.python.org/pypi/ai-rank'>ai-rank</a> 
 
 Ranks neural networks by the **accuracy–resource trade-off** and returns one
 score per model. There is no weight to choose: the exchange rate between
