@@ -323,7 +323,7 @@ band — so a failure localises.
 
 ```bibtex
 @software{ignatov_nn_rank,
-  author  = {Ignatov, Dmitry and contributors},
+  author  = {Ignatov, Dmitry},
   title   = {AI Ranking: ranking of AI systems by the accuracy--resource
              trade-off},
   year    = {2026},
