@@ -160,11 +160,38 @@ WHAT IT REPORTS, in order of how little it assumes
   ENVELOPE     who a linear price can EVER select.  Works at any K, even 2,
                and needs no rate.  Absence is a proof, not missing evidence.
   PRICE-FREE   dominations that hold at every price.
+  JET          the curve from THREE accuracies and no fit: s, kappa,
+               N_eff = s^2/kappa, and the price the frontier itself quotes,
+               lambda* = s at the operating rule N_eff = 1.  No floor, no
+               bootstrap, no units, no origin; the spacing cancels.
+  RUNG         the third-order test from FOUR accuracies and no fit:
+               D1 = (3/2) dd1 dd3 / dd2^2 - 1 >= 0, the hypothesis's own
+               first rung, strictly stronger than the dd3 >= 0 in standard
+               use, which is twice as loose.  D1 < 1 is a fit-free floor
+               verdict -- the one the F-test cannot give below 4 points.
   FLOOR TEST   whether an exchange rate exists in this data at all.
   RATE         lambda = alpha/2 from the frontier's own curvature, with a
-               bootstrap interval on alpha.
+               bootstrap interval on alpha -- kept wherever the floor test
+               confirms it, and replaced by the jet's lambda* = s wherever it
+               cannot (too few points, or a knee outside the window), since
+               alpha/2 is half the exponent of a fit whose third parameter
+               was never established.
   RANKING      every model ordered winner to loser, with the rank range it
                takes across the rate's own interval.
+  BAND         the candidates a price in Lambda can select, and that range:
+               the optimum is a band, not a point.  Lambda is the derived
+               rate interval by default, so a band of one means the derived
+               price settles the answer and nothing is arbitrated.
+  MINIMAX      the tie inside the band broken on worst-case regret over
+               Lambda, in nats.  With the default Lambda this moves the pick
+               only where no price in the derived interval separates the
+               band -- where the old single pick was arbitrary.
+               tiebreak="support" judges the tie over every price the
+               frontier supports instead, which is what the paper measures
+               when no price can be named (median excess over the
+               minimax-optimal candidate 0.075 -> 0.029 nats) and which
+               ignores the derived price by construction.  `rank` and `score`
+               always order by sigma at the derived price.
   NEXT         where an unmeasured model would have to sit to matter.
   AXIS DROP    with several resources, whether removing an axis changes the
                pick -- the paper's own test of whether pricing it mattered
@@ -182,15 +209,25 @@ SCALE
 
 KNOWN LIMITS
 
-  Competition leaderboards do not work here.  Their rules pin quality at a
-  threshold and race on cost, so almost every entry is dominated and the
-  quality range carries no curvature.  Tested on MAI 2021 scene detection
-  (3 of 9 nondominated), MAI 2026 SR (3 of 8), NTIRE 2026 Efficient SR
-  (4 of 14) and YOLOv8+YOLO11 (5 of 10): no rate in any of them.  What the
-  method needs is a deliberate ladder -- one architecture, 8+ sizes, same
-  test set and device, quality spanning enough range that the frontier
-  visibly bends.  MobileNetV3's Table 9 (19 models, one Pixel-1 core,
-  49.8-76.6% top-1) is the one published table that passes every gate.
+  Competition leaderboards are short by construction.  Their rules pin
+  quality at a threshold and race on cost, so almost every entry is dominated
+  and the quality range carries no curvature.  Tested on MAI 2021 scene
+  detection (3 of 9 nondominated), MAI 2026 SR (3 of 8), NTIRE 2026 Efficient
+  SR (4 of 14) and YOLOv8+YOLO11 (5 of 10): the floor is testable in none of
+  them, so the verdict stays UNVERIFIED and says so.  What they do get is the
+  envelope, the band, and a price that is a first difference rather than the
+  exponent of a three-parameter fit through three points, which has no
+  residual left to check.  What the floor test needs is still a deliberate
+  ladder -- one architecture, 8+ sizes, same test set and device, quality
+  spanning enough range that the frontier visibly bends.  MobileNetV3's
+  Table 9 (19 models, one Pixel-1 core, 49.8-76.6% top-1) is the one
+  published table that passes every gate.
+
+  N_eff is a ratio of second differences, and the paper measures it as
+  noise-dominated on published windows (median straightness R^2 = 0.2233,
+  no power against a design-matched null).  It is reported as a measurement
+  standard for new sweeps, not as a re-analysis of old ones; the PRICE does
+  not depend on it, being a first difference.
 """
 import argparse
 import csv
@@ -217,6 +254,29 @@ BOOT_SKIP_N = 50        # at or above this many front points the Jacobian
 MARG_MIN_SPAN = 0.5     # but they need real range in log-resource: a divided
                         # difference over a vanishing span is noise divided
                         # by nothing (Paper 2, script 144)
+CURV_TOL = 1e-9         # how large the curvature must be, relative to the
+                        # slope over the same span, before it counts as
+                        # curvature at all rather than rounding noise in a
+                        # straight log-log frontier
+JET_MIN_NODES = 2       # a single triple fixes a price it cannot check: the
+                        # quote is one first difference, with nothing to
+                        # compare it against and no way to place the
+                        # operating point.  alpha/2 through three points is
+                        # no better -- zero residual, pure interpolation --
+                        # so neither is well founded and the jet does not
+                        # displace it there.  Below this the jet is REPORTED
+                        # and not used.
+JET_ANGLE_TOL = math.log(3.0)   # how near N_eff = 1 a triple must read before
+                                # it is called the operating point; one factor
+                                # of three either way, because N_eff is a
+                                # ratio of second differences and the paper
+                                # measures it as noise-dominated on published
+                                # windows
+REGRET_GRID = 601       # prices sampled across the supported range when the
+                        # worst-case regret is taken; the envelope is
+                        # piecewise linear in lambda, so the sup is attained
+                        # at a breakpoint and the grid only has to resolve
+                        # which one
 
 
 # ======================================================== input adapters ====
@@ -408,8 +468,12 @@ def dominations(df, axes=("resource",)):
 
 # =================================================================== fit ====
 def _aicc(rss, n, kp, var=True):
+    """None when it is not defined: too few points for the correction, or no
+    residual left at all.  A 3-parameter fit through a noiseless frontier can
+    land on rss = 0 exactly, and log(0) is not a number -- AICc is printed as
+    corroboration only, so there is nothing to salvage and nothing to raise."""
     k = kp + 1 if var else kp
-    return None if n - k - 1 <= 0 else \
+    return None if n - k - 1 <= 0 or rss <= 0 else \
         n * math.log(rss / n) + 2 * k + 2 * k * (k + 1) / (n - k - 1)
 
 
@@ -526,18 +590,218 @@ def marginal_curve(df, axis):
     return np.array(xs), np.array(ls)
 
 
+# =============================================================== the jet ====
+# Three accuracies read the curve; four read the rung.  Neither fits anything,
+# neither resamples, and neither needs a floor -- which is the whole point:
+# alpha/2 inherits whatever the three-parameter fit invented.
+def _dd(xn, fn):
+    """Newton divided differences f[x0..xk], k = 1..len(xn)-1."""
+    tab, out = [float(v) for v in fn], []
+    for k in range(1, len(xn)):
+        tab = [(tab[i + 1] - tab[i]) / (xn[i + k] - xn[i])
+               for i in range(len(tab) - 1)]
+        out.append(tab[0])
+    return out
+
+
+def jet_at(x3, l3):
+    """(s, kappa, N_eff) at the middle node of a triple of log-resources.
+
+    l is ln eps and S = -ln eps, so s = -l'(x0) and kappa = l''(x0).  Written
+    with unequal-node divided differences, which reduce IDENTICALLY to the
+    paper's equally spaced form
+
+        N_eff = (l_plus - l_minus)^2 / (4 (l_minus - 2 l_0 + l_plus))
+
+    when the two steps are equal; as there, the step cancels out of N_eff.
+    The general form is used because measured grids are not geometric -- the
+    paper reports that not one of its 117 frontiers yields an equally spaced
+    quadruple -- so interpolating onto an equal grid would bias kappa upward
+    on a convex curve, while the divided difference does not.
+
+    None unless s > 0 and kappa > 0: the curve must be improving and
+    log-convex at this node, or neither N_eff nor a price is defined there.
+    """
+    (xm, x0, xp), (lm, l0, lp) = x3, l3
+    a, b = x0 - xm, xp - x0
+    if not (a > 0 and b > 0):
+        return None
+    dl = (-b / (a * (a + b))) * lm + ((b - a) / (a * b)) * l0 \
+         + (a / (b * (a + b))) * lp
+    d2l = 2.0 * ((lp - l0) / b - (l0 - lm) / a) / (a + b)
+    s, kap = -dl, d2l
+    # kappa > 0 is not enough: on a straight log-log frontier the second
+    # difference is zero up to rounding, and a kappa of 1e-17 would report
+    # N_eff = s^2/kappa in the quadrillions.  Require it to be resolvable
+    # against the curve's own first difference over the same span.
+    if not (s > 0 and kap * (a + b) > CURV_TOL * s):
+        return None
+    return {"resource": float(math.exp(x0)), "x": float(x0), "s": float(s),
+            "kappa": float(kap), "n_eff": float(s * s / kap),
+            "lambda_star": float(s),
+            "spacing_ratio": float(max(a, b) / min(a, b))}
+
+
+def read_jet(xs, ls):
+    """The frontier's own quoted price, from three accuracies and no fit.
+
+    Prop. 'planeprice': lambda* = s / sqrt(t N_eff), so at the operating rule
+    N_eff = 1 in delivered units the canonical price is lambda* = s, the
+    channel slope itself -- no floor, no fit, no units, no origin, and no
+    bandwidth, the spacing cancelling identically.
+
+    The price is therefore a FIRST difference.  Only the LOCATION of the
+    operating point uses the second difference, and the paper is explicit that
+    N_eff is noise-dominated on published windows (median straightness
+    R^2 = 0.2233), so N_eff is reported as a measurement standard and the
+    price falls back to the deepest readable node -- where a deployment
+    actually sits -- when no node is near the right angle.
+    """
+    nodes = [j for j in (jet_at(xs[i - 1:i + 2], ls[i - 1:i + 2])
+                         for i in range(1, len(xs) - 1)) if j is not None]
+    out = {"nodes": nodes, "n_nodes": len(nodes), "lambda": None,
+           "s": None, "kappa": None, "n_eff": None, "at_resource": None,
+           "lambda_low": None, "lambda_high": None, "spacing_ratio": None,
+           "at_right_angle": None, "provenance": "none", "reason": ""}
+    if not nodes:
+        out["reason"] = ("no interior triple is both improving and "
+                         "log-convex (s > 0 and kappa > 0 needed)")
+        return out
+    best = min(nodes, key=lambda j: abs(math.log(j["n_eff"])))
+    at_angle = abs(math.log(best["n_eff"])) <= JET_ANGLE_TOL
+    sv = sorted(j["s"] for j in nodes)
+    if at_angle:
+        prov, lam = "jet (lambda*=s at N_eff=1)", best["s"]
+    else:
+        # No node reads near the right angle, and chasing the nearest one
+        # would be selecting on noise: N_eff = s^2/kappa is largest where the
+        # second difference is smallest, so "closest to 1" prefers whichever
+        # triple curvature noise happened to bend most.  The median quote
+        # over the readable triples is the stable reading, and the spread
+        # below says how much the frontier disagrees with itself.
+        best = sorted(nodes, key=lambda j: j["s"])[len(nodes) // 2]
+        prov = ("jet (lambda*=s, one readable triple)" if len(nodes) == 1
+                else f"jet (lambda*=s, median of {len(nodes)} triples)")
+        lam = float(np.median([j["s"] for j in nodes]))
+    out.update(s=best["s"], kappa=best["kappa"], n_eff=best["n_eff"],
+               at_resource=best["resource"],
+               spacing_ratio=best["spacing_ratio"],
+               at_right_angle=bool(at_angle),
+               lambda_low=float(sv[0]), lambda_high=float(sv[-1]),
+               provenance=prov)
+    out["lambda"] = float(lam)
+    if len(nodes) < JET_MIN_NODES:
+        out["reason"] = (f"{len(nodes)} readable triple: reported, but a "
+                         "single one cannot price (JET_MIN_NODES)")
+    return out
+
+
+def read_rung(xs, ls):
+    """The hypothesis's own first rung, from four accuracies and no fit.
+
+    Prop. 'strongrung': on a quadruple, s = dd1, kappa = -2 dd2 and
+    S''' = 6 dd3 with dd_k the Newton divided differences of S = -ln eps, so
+
+        D1_hat = (3/2) dd1 dd3 / dd2^2 - 1 >= 0
+
+    is N_eff_dot <= 1.  It is floor-free, bandwidth-free, and STRICTLY
+    STRONGER than the third-order statistic in standard use, dd3 >= 0, which
+    is only N_eff_dot <= 2 -- twice as loose as the hypothesis it is quoted
+    against.  The repair costs nothing: same four accuracies.
+
+    By eq. 'floorsign', eps_inf > 0 <=> D1 < 1 on the chart line, so the same
+    reading carries a fit-free second opinion on the floor, which is the one
+    verdict the F-test cannot give below 4 points and inherits a spurious
+    floor above them.
+
+    The nodes are the widest four-point subset at index thirds, as in the
+    paper.  Their spacing is reported: the paper measures a median widest-to
+    -narrowest gap of 3.0 on real grids, and shows node irregularity alone
+    refutes a strictly interior divisible truth on 54% of noiseless draws, so
+    `spacing_ratio` is how much to trust the SIGN when it is negative.
+    """
+    n = len(xs)
+    out = {"n_points": int(n), "readable": False, "dd1": None, "dd2": None,
+           "dd3": None, "D1": None, "rung_strict": None, "rung_loose": None,
+           "floor_sign": None, "spacing_ratio": None, "nodes": None,
+           "reason": ""}
+    if n < 4:
+        out["reason"] = f"{n} marginal point(s), the quadruple needs 4"
+        return out
+    idx = sorted({0, int(round((n - 1) / 3.0)),
+                  int(round(2 * (n - 1) / 3.0)), n - 1})
+    if len(idx) < 4:
+        out["reason"] = "index thirds collapse on this grid"
+        return out
+    xq = [float(xs[i]) for i in idx]
+    Sq = [-float(ls[i]) for i in idx]
+    gaps = [xq[i + 1] - xq[i] for i in range(3)]
+    if min(gaps) <= 0:
+        out["reason"] = "repeated log-resource on the quadruple"
+        return out
+    d1, d2, d3 = _dd(xq, Sq)
+    out.update(nodes=[math.exp(v) for v in xq], dd1=d1, dd2=d2, dd3=d3,
+               spacing_ratio=float(max(gaps) / min(gaps)))
+    span = xq[-1] - xq[0]
+    if not (d1 > 0 and -d2 * span > CURV_TOL * abs(d1)):
+        out["reason"] = (
+            "straight in log-log on the quadruple, so kappa > 0 is not "
+            f"resolvable (dd1 = {d1:.4g}, dd2 = {d2:.4g})"
+            if d1 > 0 and d2 <= 0 else
+            "needs s > 0 and kappa > 0 on the quadruple itself "
+            f"(dd1 = {d1:.4g}, dd2 = {d2:.4g})")
+        return out
+    D1 = 1.5 * d1 * d3 / (d2 * d2) - 1.0
+    out.update(readable=True, D1=float(D1), rung_strict=bool(D1 >= 0),
+               rung_loose=bool(d3 >= 0), floor_sign=bool(D1 < 1))
+    return out
+
+
+# ============================================================== minimax =====
+def minimax_band(df, axes, grid, sig):
+    """The optimum is a BAND, not a point, so return the band and break the
+    tie inside it on worst-case regret over the prices the frontier itself
+    supports (paper, 'what the band is not'): the candidate minimising
+
+        sup_{lambda in Lambda} [ max_a sigma_a(lambda) - sigma_i(lambda) ]
+
+    Reported in nats, so it is directly the excess effective error the pick
+    costs at the least favourable price in Lambda.  One sort of the envelope
+    already gives the band; the regret is one K-by-G maximum on the same
+    matrix the rank spread uses, so this adds no measurable time.
+    """
+    names = df["name"].to_numpy()
+    S = sigma_matrix(df, grid, axes)                       # K x G
+    reg = (S.max(axis=0)[None, :] - S).max(axis=1)
+    regret = {n: float(v) for n, v in zip(names, reg)}
+    band = list(dict.fromkeys(names[S.argmax(axis=0)]))
+    pool = band or list(names)
+    pick = min(pool, key=lambda n: (regret[n], -sig.get(n, -np.inf), n))
+    return {"band": band, "regret": regret, "pick": pick,
+            "pick_regret": regret[pick], "n_grid": len(grid)}
+
 def axis_price(df, axis, alpha=0.05, boot=400, seed=0, p_floor=0.05,
-               aicc_k="with-variance"):
+               aicc_k="with-variance", jet_price=True):
     """Derive one price for one axis from that axis's marginal curve, by the
     same alpha/2 rule and the same floor F-test used for a single resource.
-    Returns a dict including `level` and `provenance`."""
+    Returns a dict including `level` and `provenance`.
+
+    The jet (three accuracies) and the rung (four) are read alongside and
+    always reported.  `jet_price` decides what happens when the floor test
+    does NOT confirm a floor: with it on (the default) the frontier's own
+    quoted price lambda* = s replaces alpha/2 there, because alpha/2 is half
+    an exponent of a fit whose third parameter was never established, and the
+    bootstrap around that fit is skipped.  Where the floor IS confirmed
+    nothing changes -- those runs are identical to before, bit for bit."""
     xs, ls = marginal_curve(df, axis)
     n, span = len(xs), (xs[-1] - xs[0] if len(xs) > 1 else 0.0)
     out = {"axis": axis, "n_marginal": n, "log_span": float(span),
            "lambda": None, "lambda_low": None, "lambda_high": None,
            "alpha": None, "eps_inf": None, "floor_F": None, "floor_p": None,
            "aicc_delta": None, "knee": None, "knee_spanned": None,
-           "level": "UNUSABLE", "reason": "", "provenance": "none"}
+           "level": "UNUSABLE", "reason": "", "provenance": "none",
+           "jet": None, "rung": None, "lambda_jet": None, "n_eff": None,
+           "rung_D1": None, "fitted_lambda": None}
     if n < MARG_MIN_PTS:
         out["reason"] = f"marginal curve has {n} point(s), needs {MARG_MIN_PTS}"
         return out
@@ -545,6 +809,12 @@ def axis_price(df, axis, alpha=0.05, boot=400, seed=0, p_floor=0.05,
         out["reason"] = (f"marginal curve spans {span:.3f} < "
                          f"{MARG_MIN_SPAN} in log-{axis}")
         return out
+
+    # the jet and the rung first: they need no fit, so they are available
+    # even on the curves the fit below will fail to describe
+    jet, rung = read_jet(xs, ls), read_rung(xs, ls)
+    out.update(jet=jet, rung=rung, lambda_jet=jet["lambda"],
+               n_eff=jet["n_eff"], rung_D1=rung["D1"])
 
     t, eps = np.exp(xs), np.exp(ls)
     sat = fit_sat(t, eps)
@@ -590,6 +860,35 @@ def axis_price(df, axis, alpha=0.05, boot=400, seed=0, p_floor=0.05,
     out["lambda_low"] = out["lambda_high"] = lam
     out["bootstrap_refits"] = 0
     out["interval_from"] = "none"
+    out["fitted_lambda"] = lam
+    # Where the floor is NOT confirmed, alpha/2 is half the exponent of a fit
+    # whose own third parameter the data could not establish, and a bootstrap
+    # around it measures spread, not distance from the truth.  The frontier's
+    # own quoted price needs none of it: lambda* = s at the operating rule
+    # N_eff = 1 (Prop. 'planeprice').  Taking it there costs one subtraction
+    # and skips 400 refits.
+    # Not on UNUSABLE: there the F-test has REJECTED the floor, and a
+    # scale-free frontier has no exchange rate to quote (Thm 'degeneracy').
+    # kappa = 0 there, so N_eff = s^2/kappa is unbounded and any curvature the
+    # triples show is noise.  That verdict and its red banner stand as they
+    # were; the jet is reported but not used.
+    #
+    # Nor on a single triple.  The jet earns the price by being a first
+    # difference instead of a fitted exponent, but one triple gives one such
+    # difference, with nothing to compare it against and no way to place the
+    # operating point.  Swapping an unfounded alpha/2 for an unfounded
+    # lambda* is not an improvement, so the gate is JET_MIN_NODES.
+    if (jet_price and out["level"] == "UNVERIFIED"
+            and jet["lambda"] is not None
+            and jet["n_nodes"] >= JET_MIN_NODES):
+        out.update(**{"lambda": jet["lambda"],
+                      "lambda_low": jet["lambda_low"],
+                      "lambda_high": jet["lambda_high"],
+                      "provenance": jet["provenance"],
+                      "interval_from":
+                          f"jet (spread over {jet['n_nodes']} triple(s))"})
+        out["reason"] = (out["reason"] + "; price from the jet, not the fit")
+        return out
     if not boot:
         return out
     if n >= BOOT_SKIP_N:                       # the free interval suffices
@@ -608,9 +907,16 @@ def axis_price(df, axis, alpha=0.05, boot=400, seed=0, p_floor=0.05,
 
 
 # ================================================================ ranking ===
-def rank_frame(df, res, lam, grid, axes=("resource",)):
+def rank_frame(df, res, lam, grid, axes=("resource",), regret=None,
+               band=None):
     """Every candidate ordered winner to loser.  lam=None -> envelope order
-    (needs no rate).  Vectorised over the whole rate interval."""
+    (needs no rate).  Vectorised over the whole rate interval.
+
+    The ORDER and `rank` are unchanged: sigma at the derived price, so `score`
+    stays what it was and stays invariant to the candidate set.  `regret_sup`
+    and `in_band` are added as columns, which is where the minimax reading
+    lives -- read them when the band is wide and `rank` is therefore a
+    statement about one price nobody named."""
     axes = list(axes)
     env = res.get("envelope")
     pieces = (env["pieces"] if env is not None
@@ -655,6 +961,10 @@ def rank_frame(df, res, lam, grid, axes=("resource",)):
                            for n in out["name"]]
     out["optimal_to"] = [env_rng.get(n, (np.nan, np.nan))[1]
                          for n in out["name"]]
+    out["regret_sup"] = ([regret.get(n, np.nan) for n in out["name"]]
+                         if regret else np.nan)
+    out["in_band"] = ([n in set(band) for n in out["name"]]
+                      if band else False)
     out["note"] = ["dominated by " + dom_by[n] if n in dom_by
                    else "in a dent" if n in dent else ""
                    for n in out["name"]]
@@ -672,7 +982,7 @@ WORSE = {"USABLE": 0, "UNVERIFIED": 1, "UNUSABLE": 2}
 
 def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
            rank=False, p_floor=0.05, name_col="name", acc_col="accuracy",
-           res_col="resource"):
+           res_col="resource", tiebreak="interval", jet_price=True):
     """DataFrame in, result dict out.  Prints nothing, raises nothing.
 
     res_col may name ONE resource column or SEVERAL.  With several, one price
@@ -680,31 +990,72 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
     scalarisation is sigma = -ln eps - sum_a lambda_a ln t_a.  The interaction
     between axes is not fitted (Paper 2, F5): each axis is priced alone.
 
+    tiebreak decides how the single pick is drawn out of the band, which is
+    what the optimum actually is.  Lambda below is the set of prices the tie
+    is judged over:
+      "interval" (default) the derived rate interval.  Where that interval
+                 admits one winner the tie-break RETURNS that winner, so a
+                 derived price is never overwritten; only a frontier the
+                 price itself leaves open gets arbitrated, and that is
+                 exactly where the single pick used to be arbitrary.
+      "support"  every price the frontier supports -- the envelope's own
+                 breakpoint span, unioned with the rate interval.  This is
+                 the paper's reading for a deployment that can name no price
+                 at all, and it ignores the derived one on purpose, so it is
+                 opt-in.  "minimax" is an alias.
+      "point"    no tie-break: the sigma argmax at the derived price.  This
+                 is the winner this function returned before the band
+                 existed.
+    jet_price=False keeps alpha/2 as the price even where the floor test
+    cannot confirm it, instead of the frontier's own quoted lambda* = s.  The
+    jet prices nothing unless it has JET_MIN_NODES readable triples, since
+    one triple is a quote with nothing to check it against.
+    Neither switch touches `rank`, `score` or `prices`.
+
     RETURNS a dict with these keys, in this order:
 
     winner        dict, or None if no ranking could be made.
-                    name      the selected model
+                    name      the selected model: the band member with the
+                              smallest worst-case regret over Lambda, which
+                              is the derived rate interval by default and so
+                              equals the sigma argmax whenever that interval
+                              settles the answer.  tiebreak="point" always
+                              returns the argmax
                     score     its score (see SCORE below), higher is better
                     sigma     its sigma in nats
-                    runner_up the second-placed model
-                    margin_nats     sigma gap to the runner-up
+                    runner_up the next-best model by sigma
+                    margin_nats     sigma gap to the runner-up.  NEGATIVE
+                              when the minimax pick is not the sigma argmax:
+                              that is the sigma it gives up to halve its
+                              worst case
                     robust    True if it wins at every rate in the interval
                     winner_set      every model that wins somewhere in it
                     resolved  False if it and the runner-up sit closer than
                               ln 1.5 apart in log-resource
                     max_kl_regret_in_interval
                               worst cost in nats of picking it anyway
+                    point_pick      what a single derived price would pick
+                    regret_sup_nats its worst-case regret over the supported
+                              prices
+                    band      the candidates a supported price can select
+                    tiebreak  the mode that moved the pick ("interval" or
+                              "support"), else "point" if nothing moved it
     ranking       DataFrame, one row per candidate, winner first, or None
                   unless rank=True.  Columns, in order: name, score, rank,
                   accuracy, <each resource>, sigma, eps_eff, margin_to_next,
                   rank_low, rank_high, rank_stable, optimal_from,
-                  optimal_to, note.
+                  optimal_to, regret_sup, in_band, note.
                     score / eps_eff   see SCORE below
                     rank_low/high     the rank range this model takes across
                                       the whole rate interval; equal values
                                       mean its position does not move
                     optimal_from/to   the lambda range in which this model is
                                       the envelope optimum (NaN if never)
+                    regret_sup        worst-case regret in nats over the
+                                      supported price range: the excess
+                                      effective error this pick costs at the
+                                      least favourable supported price
+                    in_band           True if some supported price selects it
                     note              "dominated by X", "in a dent", or ""
     status        "selected"   floor confirmed, the ranking is a trade-off
                                ranking
@@ -735,6 +1086,24 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
     envelope      dict: pieces (DataFrame of name and the lambda range it
                   owns), winners, dominated, in_a_dent.  None with several
                   axes, where the envelope is not one-dimensional
+    jet           dict (per axis when several): the curve read from three
+                  accuracies and no fit -- s, kappa, N_eff = s^2/kappa, the
+                  quoted price lambda* = s, the resource it was read at, the
+                  spread over readable triples, and every node in `nodes`.
+                  No floor, no bootstrap, no bandwidth
+    rung          dict (per axis when several): dd1, dd2, dd3 on the widest
+                  quadruple at index thirds, D1 = (3/2) dd1 dd3/dd2^2 - 1,
+                  rung_strict (D1 >= 0, i.e. N_eff_dot <= 1), rung_loose
+                  (dd3 >= 0, the looser statistic in standard use),
+                  floor_sign (D1 < 1, a fit-free floor verdict) and
+                  spacing_ratio, which says how much to trust a negative sign
+    band          dict: members (the candidates some price in Lambda
+                  selects), size, lambda_from, lambda_to, efolds,
+                  supported_span (the envelope's own breakpoint span, whether
+                  or not Lambda was widened to it), support_from, n_grid
+    minimax       dict: pick, regret_nats, point_pick, point_regret_nats,
+                  improvement_nats, regret (per candidate), support_from,
+                  applied
     price_free    DataFrame of (winner, loser) pairs that hold at EVERY
                   price: the winner is no worse on accuracy and on every
                   resource.  Needs no rate at all
@@ -779,6 +1148,7 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
            "prices": None, "rate": None, "fit": None,
            "envelope": None,
            "price_free": pd.DataFrame(columns=["winner", "loser"]),
+           "jet": None, "rung": None, "band": None, "minimax": None,
            "front": [],
            "scores": pd.DataFrame(columns=["name", "sigma"]),
            "axis_drop": None, "next": None, "notes": []}
@@ -807,14 +1177,20 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
         return verdict("UNUSABLE", res["reason"])
 
     # ---- one price per axis, each from its own marginal curve -------------
-    prices = [axis_price(front, a, alpha, boot, seed, p_floor, aicc_k)
+    prices = [axis_price(front, a, alpha, boot, seed, p_floor, aicc_k,
+                         jet_price)
               for a in axes]
     res["prices"] = pd.DataFrame([
         {k: pr.get(k) for k in ("axis", "lambda", "lambda_low", "lambda_high",
                                 "alpha", "eps_inf", "floor_p", "n_marginal",
                                 "log_span", "level", "provenance",
-                                "interval_from", "reason")}
+                                "interval_from", "lambda_jet", "n_eff",
+                                "rung_D1", "fitted_lambda", "reason")}
         for pr in prices])
+    res["jet"] = (prices[0]["jet"] if not multi
+                  else {pr["axis"]: pr["jet"] for pr in prices})
+    res["rung"] = (prices[0]["rung"] if not multi
+                   else {pr["axis"]: pr["rung"] for pr in prices})
     priced = {pr["axis"]: pr for pr in prices if pr["lambda"] is not None}
     if not priced:
         res["status"] = "no_rate"
@@ -912,7 +1288,111 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
                      "robust": len(wset) == 1, "winner_set": wset,
                      "max_kl_regret_in_interval": reg,
                      "log_resource_separation": sep,
-                     "resolved": bool(sep >= SPAN_MIN)}
+                     "resolved": bool(sep >= SPAN_MIN),
+                     "point_pick": win, "regret_sup_nats": None,
+                     "tiebreak": "point"}
+
+    # ---- the optimum is a band: return it, then break the tie on regret ---
+    # Lambda is the set of prices the tie is judged over, and the default is
+    # the DERIVED RATE INTERVAL.  That matters: where the interval admits one
+    # winner the tie-break returns that winner, so a derived price is never
+    # overwritten -- it is only arbitrated where the price itself leaves the
+    # answer open, which is where the old single pick was arbitrary.
+    #
+    # tiebreak="support" widens Lambda to every price the frontier supports
+    # (the envelope's own breakpoint span, unioned with the rate interval so
+    # the derived price stays inside it).  That is the paper's reading when
+    # NO price can be named at all; it deliberately ignores the derived one,
+    # so it is opt-in and not the default.
+    sig = dict(zip(sc["name"], sc["sigma"]))
+    wide = tiebreak in ("support", "minimax")
+    brk = []
+    if not multi:
+        a0 = axes[0]
+        pcs = res["envelope"]["pieces"]
+        brk = sorted({float(v) for v in
+                      list(pcs["lambda_from"]) + list(pcs["lambda_to"])
+                      if v is not None and not pd.isna(v) and v > 0})
+        rlo, rhi = priced[a0]["lambda_low"], priced[a0]["lambda_high"]
+    if wide and not multi and len(brk) >= 2:
+        lam_lo, lam_hi = min(brk[0], rlo), max(brk[-1], rhi)
+        src = ("every price the frontier supports"
+               if (brk[0] <= rlo and brk[-1] >= rhi) else
+               "every price the frontier supports, and the rate interval")
+        gridL = [{a0: float(v)}
+                 for v in np.linspace(lam_lo, lam_hi, REGRET_GRID)]
+    elif multi:
+        lam_lo = lam_hi = None
+        src = ("the per-axis rate interval corners"
+               + ("; several axes have no one-dimensional envelope to widen "
+                  "to" if wide else ""))
+        gridL = corners
+    else:
+        lam_lo, lam_hi = rlo, rhi
+        src = ("the derived rate interval"
+               + ("; the envelope has no interior breakpoint to widen to"
+                  if wide else ""))
+        gridL = ([{a0: float(v)}
+                  for v in np.linspace(lam_lo, lam_hi, REGRET_GRID)]
+                 if lam_hi > lam_lo else [{a0: float(lam[a0])}])
+    # the derived price itself always belongs to Lambda, so the candidate it
+    # selects is always in the band and the minimax pick can never be the
+    # worse hedge of the two
+    gridL = list(gridL) + [dict(lam)]
+    mm = minimax_band(cands, axes, gridL, sig)
+    res["band"] = {"members": mm["band"], "size": len(mm["band"]),
+                   "lambda_from": lam_lo, "lambda_to": lam_hi,
+                   "efolds": (None if not lam_lo or not lam_hi or lam_lo <= 0
+                              else float(math.log(lam_hi / lam_lo))),
+                   "supported_span": ([brk[0], brk[-1]] if len(brk) >= 2
+                                      else None),
+                   "support_from": src, "n_grid": mm["n_grid"]}
+    res["minimax"] = {
+        "pick": mm["pick"], "regret_nats": mm["pick_regret"],
+        "point_pick": win, "point_regret_nats": mm["regret"].get(win),
+        "improvement_nats": (None if mm["regret"].get(win) is None else
+                             float(mm["regret"][win] - mm["pick_regret"])),
+        "regret": mm["regret"], "support_from": src,
+        "applied": bool(tiebreak != "point" and level != "UNUSABLE")}
+    res["winner"]["band"] = mm["band"]
+    # Not on UNUSABLE.  The floor is rejected there, so no exchange rate
+    # exists (Thm 'degeneracy'), the frontier is a straight line in log-log,
+    # and the band swallows nearly every candidate.  Both picks are then
+    # arbitrary and the red banner already says the ranking means nothing, so
+    # trading one arbitrary pick for another is churn, not a decision.  The
+    # band and the regrets are still reported.
+    if level == "UNUSABLE" and tiebreak != "point" and len(mm["band"]) > 1:
+        res["notes"].append(
+            "the tie inside the band is NOT broken here: with the floor "
+            "rejected there is no rate to judge regret at, so the pick is "
+            "the sigma argmax as before")
+    if res["minimax"]["applied"] and mm["pick"] != win:
+        pick = mm["pick"]
+        others = [n for n in sig if n != pick]
+        best_other = max(others, key=lambda n: sig[n]) if others else pick
+        res["winner"].update(
+            name=pick, sigma=float(sig[pick]),
+            score=1.0 / (1.0 + math.exp(-float(sig[pick]))),
+            runner_up=best_other,
+            margin_nats=float(sig[pick] - sig[best_other]),
+            tiebreak=tiebreak)
+        xw = cands.loc[cands["name"] == pick,
+                       ["x__" + a for a in axes]].to_numpy()
+        xr = cands.loc[cands["name"] == best_other,
+                       ["x__" + a for a in axes]].to_numpy()
+        sp = float(np.max(np.abs(xw - xr))) if len(xw) and len(xr) else sep
+        res["winner"].update(log_resource_separation=sp,
+                             resolved=bool(sp >= SPAN_MIN))
+    res["winner"]["regret_sup_nats"] = mm["regret"].get(res["winner"]["name"])
+    # `robust` is a claim about a NAME, so it has to be re-read once the name
+    # can change: the rate interval admits one winner AND it is this one
+    res["winner"]["robust"] = bool(
+        len(wset) == 1 and wset[0] == res["winner"]["name"])
+    if len(mm["band"]) > 1:
+        res["notes"].append(
+            f"{len(mm['band'])} candidates are optimal somewhere over "
+            f"{src}, so no price there separates them; the single pick is a "
+            "tie broken on worst-case regret, not a unique optimum")
 
     # ---- does each axis need a price?  drop it and see (script 144) ------
     if multi and len(priced) > 1:
@@ -930,7 +1410,9 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
         res["axis_drop"] = pd.DataFrame(drops)
 
     if rank:
-        res["ranking"] = rank_frame(cands, res, lam, corners, axes)
+        res["ranking"] = rank_frame(cands, res, lam, corners, axes,
+                                    regret=res["minimax"]["regret"],
+                                    band=res["band"]["members"])
     if not multi and (p0["eps_inf"] or 0) > 0 and p0["knee"]:
         gap = float(np.min(np.abs(front["x__" + axes[0]].to_numpy()
                                   - math.log(p0["knee"]))))
@@ -939,7 +1421,14 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
                            bool(gap > SPAN_MIN)}
     res["status"] = ("selected" if level == "USABLE" else
                      "unverified" if level == "UNVERIFIED" else "no_floor")
-    return verdict(level, why, p_value=p0.get("floor_p"), F=p0.get("floor_F"))
+    rg = p0.get("rung") or {}
+    return verdict(level, why, p_value=p0.get("floor_p"), F=p0.get("floor_F"),
+                   rung={"D1": rg.get("D1"), "readable": rg.get("readable"),
+                         "rung_strict": rg.get("rung_strict"),
+                         "rung_loose": rg.get("rung_loose"),
+                         "floor_sign": rg.get("floor_sign"),
+                         "spacing_ratio": rg.get("spacing_ratio"),
+                         "reason": rg.get("reason")})
 
 # ================================================================ render ====
 RED = "\033[1;31m"                        # problems only
@@ -1006,6 +1495,52 @@ def render(r, color=True):
             L.append(f"  {w} beats {l_}")
     L.append(f"\nCULL ........... {len(r['front'])} of "
              f"{r['n_candidates']} nondominated")
+
+    j = r.get("jet")
+    j = (j if not multi else (j or {}).get(ax)) or {}
+    if j.get("lambda") is not None:
+        L.append(f"\nJET ............ three accuracies, no fit, no "
+                 f"bootstrap, no floor  [{j['provenance']}]")
+        L.append(f"  s ............ {j['s']:.4f}   kappa = "
+                 f"{j['kappa']:.4f}   N_eff = {j['n_eff']:.4f}"
+                 + ("   <- the right angle" if j["at_right_angle"] else ""))
+        L.append(f"  lambda* = s .. {j['lambda']:.4f} nats per e-fold, read "
+                 f"at {ax} = {j['at_resource']:.4g}")
+        L.append(f"  spread ....... [{j['lambda_low']:.4f}, "
+                 f"{j['lambda_high']:.4f}] over {j['n_nodes']} readable "
+                 "triple(s)")
+        if not j["at_right_angle"]:
+            L.append("  ! N_eff is a ratio of second differences and is "
+                     "noise-dominated on published windows")
+            L.append("    (paper: median straightness R^2 = 0.2233).  No "
+                     "triple here reads near the right")
+            L.append("    angle, so the quote is the median over the readable "
+                     "triples, not a chase after")
+            L.append("    the node closest to N_eff = 1, which would be a "
+                     "chase after curvature noise.")
+    elif j.get("reason"):
+        L.append(f"\nJET ............ not readable: {j['reason']}")
+
+    g = r.get("rung")
+    g = (g if not multi else (g or {}).get(ax)) or {}
+    if g.get("readable"):
+        L.append("\nRUNG ........... four accuracies, no fit: the "
+                 "hypothesis's own first rung")
+        L.append(f"  D1_hat ....... {g['D1']:+.4f}  -> "
+                 f"{'N_eff_dot <= 1 HOLDS' if g['rung_strict'] else 'REFUTED'}"
+                 "   (the strict rung; this is the repair)")
+        L.append(f"  dd3 .......... {g['dd3']:+.4g}  -> "
+                 f"{'holds' if g['rung_loose'] else 'refuted'}"
+                 "   (third order in standard use: only N_eff_dot <= 2)")
+        L.append(f"  floor sign ... D1 {'<' if g['floor_sign'] else '>='} 1 "
+                 f"-> eps_inf {'> 0' if g['floor_sign'] else '= 0'}"
+                 "   (fit-free, no F-test)")
+        L.append(f"  nodes ........ widest quadruple at index thirds, "
+                 f"widest/narrowest gap {g['spacing_ratio']:.2f}"
+                 + ("  (irregular: distrust a negative sign)"
+                    if g["spacing_ratio"] > 3.0 else ""))
+    elif g.get("reason"):
+        L.append(f"\nRUNG ........... not readable: {g['reason']}")
 
     pr = r.get("prices")
     if multi and pr is not None:
@@ -1124,9 +1659,42 @@ def render(r, color=True):
             L.append(f"  {nm:<20} {sg:+.4f}"
                      + ("   <= winner" if nm == w["name"] else ""))
 
-    L += ["", _green(f"WINNER ......... {w['name']}   margin "
-                     f"{w['margin_nats']:.4f} nats over {w['runner_up']}",
-                     color)]
+    bd, mx = r.get("band"), r.get("minimax")
+    if bd and mx:
+        lo, hi = bd["lambda_from"], bd["lambda_to"]
+        rng_ = ("" if lo is None or hi is None else
+                f" for lambda in [{lo:.4f}, {hi:.4f}]"
+                + ("" if bd["efolds"] is None
+                   else f" ({bd['efolds']:.2f} e-folds)"))
+        L += ["", f"BAND ........... {bd['size']} of {len(r['front'])} "
+                  f"nondominated candidates are optimal somewhere{rng_}",
+              f"  support ...... {bd['support_from']}",
+              f"  members ...... {', '.join(bd['members'])}"]
+        L.append(f"  MINIMAX ...... {mx['pick']}, worst case "
+                 f"{mx['regret_nats']:.4f} nats over that whole range")
+        if mx["point_regret_nats"] is not None:
+            L.append(f"  point price .. {mx['point_pick']}, worst case "
+                     f"{mx['point_regret_nats']:.4f} nats"
+                     + ("" if not mx["improvement_nats"]
+                        else f"  ({mx['improvement_nats']:+.4f} nats of "
+                             "regret saved by the minimax pick)"))
+        if bd["size"] > 1:
+            L.append("  a band is an indifference region, not a confidence "
+                     "statement: no price in the range")
+            L.append("  above separates its members, so the single pick is a "
+                     "tie broken on worst case.")
+
+    mgn = (f"margin {w['margin_nats']:.4f} nats over {w['runner_up']}"
+           if w["margin_nats"] >= 0 else
+           f"{-w['margin_nats']:.4f} nats behind {w['runner_up']} at the "
+           "point price, and ahead on worst case")
+    L += ["", _green(f"WINNER ......... {w['name']}   {mgn}", color)]
+    if w.get("tiebreak", "point") != "point" and mx:
+        L.append(f"  TIE BROKEN ... on worst-case regret over "
+                 f"{mx['support_from']}, no single")
+        L.append("                 price in it separating the band; the "
+                 "RANKING still orders by sigma")
+        L.append("                 at the derived price")
     if w["robust"]:
         if multi:
             L.append(f"  ROBUST ....... {w['name']} wins at every corner of "
@@ -1135,6 +1703,17 @@ def render(r, color=True):
             L.append(f"  ROBUST ....... {w['name']} wins at EVERY rate in "
                      f"[{t_['lambda_low'][ax]:.4f}, "
                      f"{t_['lambda_high'][ax]:.4f}]")
+    elif len(w["winner_set"]) == 1:
+        L.append(f"  POINT PICK ... {w['winner_set'][0]} is the sigma argmax "
+                 "at every rate in the derived")
+        L.append("                 interval, so the derived price does "
+                 "settle this one; the pick above")
+        L.append("                 hedges the wider range of prices the "
+                 "frontier supports instead, which")
+        L.append("                 tiebreak='support' asks for.  Pass "
+                 "tiebreak='interval' (the default)")
+        L.append("                 or 'point' to let the derived price "
+                 "decide.")
     else:
         L.append(f"  ! NOT ROBUST . the rate interval admits "
                  f"{len(w['winner_set'])} winners: "
@@ -1199,6 +1778,22 @@ if __name__ == "__main__":
                          f"the marginal curve has {BOOT_SKIP_N}+ points, "
                          "0 disables intervals")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--tiebreak",
+                    choices=("interval", "support", "point", "minimax"),
+                    default="interval",
+                    help="how to break the tie inside the band: 'interval' "
+                         "(default) minimises worst-case regret over the "
+                         "derived rate interval, so a derived price is never "
+                         "overwritten and only a genuine tie is arbitrated; "
+                         "'support' widens that to every price the frontier "
+                         "supports, which ignores the derived price on "
+                         "purpose; 'point' takes the sigma argmax at the "
+                         "derived price and breaks no tie at all "
+                         "('minimax' is an alias for 'support')")
+    ap.add_argument("--no-jet", action="store_true",
+                    help="do not fall back to the frontier's own quoted "
+                         "price lambda* = s where the floor test fails; use "
+                         "alpha/2 there as before")
     ap.add_argument("--rank", action="store_true",
                     help="order ALL models winner to loser")
     ap.add_argument("--out-csv", metavar="FILE",
@@ -1237,7 +1832,8 @@ if __name__ == "__main__":
     outcome = select(frame, alpha=args.alpha, boot=args.boot, seed=args.seed,
                      aicc_k=args.aicc_k,
                      rank=args.rank or bool(args.out_csv),
-                     res_col=frame.attrs.get("axes") or "resource")
+                     res_col=frame.attrs.get("axes") or "resource",
+                     tiebreak=args.tiebreak, jet_price=not args.no_jet)
     if not args.quiet:
         print(render(outcome, color=not args.no_color))
     if args.out_csv and outcome["ranking"] is not None:

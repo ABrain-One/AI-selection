@@ -20,8 +20,8 @@ classifiers = [
     'Intended Audience :: Science/Research',
 ]
 
-keywords = ['neural network ranking', 'model selection', 'AI system', 'accuracy latency trade-off', 'pareto front', 'quality resource trade-off', 'inference cost analysis', 'model efficiency benchmark', 'deep learning model comparison', 'python model ranking']
-authors = [{ name = 'ABrain One and contributors', email = 'AI@ABrain.one' }]
+keywords = ['neural network ranking', 'model selection', 'AI system', 'accuracy latency trade-off', 'pareto front', 'quality resource trade-off', 'inference cost analysis', 'model efficiency benchmark', 'deep learning model comparison', 'python model ranking', 'minimax regret', 'model selection under price uncertainty']
+authors = [{ name = 'ABrain-One', email = 'AI@ABrain.one' }]
 
 [project.urls]
 Homepage = 'https://ABrain.one'

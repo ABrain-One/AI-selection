@@ -1,9 +1,13 @@
 # AI Ranking
-<sub><a href='https://pypi.python.org/pypi/nn-rank'><img src='https://img.shields.io/pypi/v/nn-rank.svg'/></a> <a href="https://pepy.tech/project/nn-rank"><img alt="NN Ranking" src="https://static.pepy.tech/badge/nn-rank"></a>
+<sub><a href='https://pypi.python.org/pypi/nn-rank'><img src='https://img.shields.io/pypi/v/nn-rank.svg'/></a> <a href="https://pepy.tech/project/nn-rank"><img alt="NN Ranking" src="https://static.pepy.tech/badge/nn-rank"></a><br/>
+alias <a href='https://pypi.python.org/pypi/ai-rank'>ai-rank</a> 
 
 Ranks neural networks by the **accuracy–resource trade-off** and returns one
 score per model. There is no weight to choose: the exchange rate between
 accuracy and cost is derived from the candidates' own frontier.
+
+Nothing is declared by hand — no price, no grain, no chance level. The only
+argument is `--alpha`, a coverage convention.
 
 ## Create and Activate a Virtual Environment (recommended)
 
@@ -42,9 +46,12 @@ df = pd.DataFrame({
 r = select(df, res_col=["flops_B", "params_M"], rank=True)
 
 r["winner"]["name"]       # 'B0'      <- the selected model
-r["winner"]["score"]      # 0.7140    <- its score, higher is better
+r["winner"]["score"]      # 0.8024    <- its score, higher is better
 r["verdict"]["level"]     # 'USABLE' | 'UNVERIFIED' | 'UNUSABLE'
 r["ranking"]              # DataFrame: name, score, rank, ...
+
+r["band"]["members"]      # ['B4', 'B0']  <- what a price in the interval can pick
+r["minimax"]["regret"]    # worst-case regret per candidate, in nats
 ```
 
 ### Input
@@ -73,11 +80,14 @@ value as it is.
 |---|---|
 | `winner["name"]` | **the selected model** |
 | `winner["score"]` | **its score** — higher is better |
-| `ranking` | a `DataFrame`, winner first: `name`, `score`, `rank`, `accuracy`, each resource, `sigma`, `eps_eff`, `margin_to_next`, `rank_low`, `rank_high`, `note` |
+| `ranking` | a `DataFrame`, winner first: `name`, `score`, `rank`, `accuracy`, each resource, `sigma`, `eps_eff`, `margin_to_next`, `rank_low`, `rank_high`, `optimal_from`, `optimal_to`, `regret_sup`, `in_band`, `note` |
+| `band` | the candidates a supported price can select, and the price range that supports them |
+| `minimax` | the pick, its worst-case regret in nats, and what a single price would have picked |
 
 Also returned: `verdict`, `status`, `prices` (one price per resource axis),
-`rate`, `price_free` (dominations true at every price), `front`, `fit`,
-`envelope`, `axis_drop`, `next`, `notes`, `problems`. `select()` prints
+`rate`, `price_free` (dominations true at every price), `jet` (the curve read
+from three accuracies), `rung` (the fit-free third-order test), `front`,
+`fit`, `envelope`, `axis_drop`, `next`, `notes`, `problems`. `select()` prints
 nothing and raises nothing; bad input comes back as `status="bad_input"` with
 the offending rows listed in `problems`.
 
@@ -112,12 +122,105 @@ nothing; a problem prints in red, first.
 | level | meaning |
 |---|---|
 | `USABLE` | the error floor is confirmed by a nested F-test, so an exchange rate exists and the ranking is a genuine trade-off ranking |
-| `UNVERIFIED` | too few points on the frontier to test the floor, or its knee lies outside the measured range — the ranking is a guess |
+| `UNVERIFIED` | too few points on the frontier to test the floor, or its knee lies outside the measured range — the price comes from the jet instead of the fit (below) |
 | `UNUSABLE` | the floor is rejected: no exchange rate exists in this data, and the ranking collapses to resource order |
 
 `UNVERIFIED` and `UNUSABLE` still return a full ranking — labelled, not
 withheld. What holds regardless of the verdict is `price_free`: a model beaten
-on accuracy **and** on every resource can never win at any price.
+on accuracy **and** on every resource can never win at any price. So does the
+`band`: it is built from the envelope, which needs no rate, no floor and no
+fit.
+
+A second, independent floor verdict comes from `rung["floor_sign"]`, which is
+read from four accuracies with no fit at all — see the rung below. It is the
+one verdict the F-test cannot give below four points.
+
+### The optimum is a band, not a point
+
+Two candidates can be separated by a price, or not separated by any price the
+data supports. `select()` reports which case it is in, and only picks for you
+in the first.
+
+`band["members"]` are the candidates that some price in **Λ** would select,
+where Λ is the **derived rate interval** by default. A band of one means the
+derived price settles the answer: `winner` is then the `sigma` argmax, exactly
+as before. A band of more than one means no price in that interval separates
+its members, and the tie is broken on **worst-case regret**,
+
+```
+regret(i) = max over lambda in Lambda of [ best sigma at lambda - sigma(i) at lambda ]
+```
+
+reported per candidate in `ranking["regret_sup"]`, in nats — the excess
+effective error that choosing `i` costs at the least favourable price in Λ.
+This is the only case in which the winner differs from the old single pick,
+and it is the case in which the old single pick was arbitrary: the previous
+version printed `! NOT ROBUST` and named the other winners without choosing
+between them.
+
+`band["supported_span"]` is reported whatever Λ is: the span of the envelope's
+own breakpoints, outside which no price changes the answer at all. A candidate
+outside it is optimal at **no** price, which is a proof, not missing evidence.
+
+| `tiebreak=` | Λ |
+|---|---|
+| `"interval"` (default) | the derived rate interval — never overwrites a price that settles the answer |
+| `"support"` | every price the frontier supports. The paper's reading for a deployment that can name **no** price; it ignores the derived price by construction, which is why it is opt-in. On the paper's corpus it cuts the median excess over the minimax-optimal candidate from 0.075 to 0.029 nats — a figure measured in that same wide range, so it is not a claim about a deployment that does have a price |
+| `"point"` | nothing: the `sigma` argmax, breaking no tie |
+
+Because the derived price always lies inside Λ, the candidate it selects is
+always in the band, so `minimax["regret_nats"] <= minimax["point_regret_nats"]`
+always holds. `rank` and `score` are untouched by any of this: they order by
+`sigma` at the derived price, so `score` stays comparable across runs.
+
+### Three accuracies, four accuracies
+
+Two readings need **no fit, no bootstrap and no floor**. Both are always
+reported, in `jet` and `rung`.
+
+**The jet — the price the frontier quotes.** With `S = -ln eps` against
+`x = ln resource`, a triple gives the slope `s`, the curvature `kappa` and the
+channel count `N_eff = s^2 / kappa`. The canonical price is
+`lambda* = s / sqrt(t * N_eff)`, so at the operating rule `N_eff = 1` in
+delivered units it is simply
+
+```
+lambda* = s
+```
+
+a **first** difference: no floor, no units, no origin, and the spacing cancels
+identically. `N_eff` itself is a ratio of second differences and is
+noise-dominated on published windows, so it is reported as a measurement
+standard; where no triple reads near the right angle the quote is the median
+over the readable triples, with the spread in `jet["lambda_low" /
+"lambda_high"]`.
+
+The jet replaces the fitted `alpha/2` price in one situation only: the floor
+test **could not be run** (too few points, or a knee outside the measured
+range) **and** the marginal curve carries at least two readable triples. Where
+the floor is confirmed, `alpha/2` and its bootstrap stand and those runs are
+unchanged number for number. Where the floor is *rejected*, nothing changes
+either: a scale-free frontier has no rate to quote and `kappa = 0` makes
+`N_eff` meaningless. And on a single triple nothing changes, because one first
+difference is a quote with nothing to check it against — no better founded
+than an exponent interpolated through three points, so there is no reason to
+prefer it. Pass `jet_price=False` (`--no-jet`) to keep `alpha/2` everywhere.
+
+**The rung — the third-order test, repaired.** On a quadruple, with `dd_k` the
+Newton divided differences of `S`,
+
+```
+D1_hat = (3/2) * dd1 * dd3 / dd2^2 - 1 >= 0
+```
+
+is the hypothesis's own first rung, `N_eff_dot <= 1`. The third-order
+statistic in standard use, `dd3 >= 0`, is only `N_eff_dot <= 2` — twice as
+loose as the hypothesis it is quoted against — so the sharper test comes free
+from the same four accuracies. And since a floor is present exactly when
+`D1 < 1`, the same reading carries `rung["floor_sign"]`, a floor verdict with
+no fit behind it. `rung["spacing_ratio"]` is the widest-to-narrowest gap of
+the four nodes: node irregularity alone can flip a negative sign, so distrust
+a refutation when it is large.
 
 ### How many models are needed
 
@@ -127,7 +230,9 @@ Counts refer to candidates that **survive the cull**, not those supplied.
 |---|---|
 | **8 or more** | the floor test identifies a rate reliably — `USABLE` expected |
 | 6–7 | the papers' threshold, but noise-sensitive: identification 81% at 1% accuracy noise, 9% at 3% |
-| 3–5 | the floor cannot be tested; a ranking is returned, labelled `UNVERIFIED` |
+| 4–5 | the F-test cannot settle the floor, but the **rung** reads: a fit-free floor verdict, and the jet prices once it has two triples |
+| 3 | one triple: `N_eff` and a reported jet quote, the envelope and the band — no rung, and the price stays `alpha/2` |
+| 2 | the envelope and `price_free` only, which still prove who can never win |
 
 Fewer still ranks usefully: the exponent's precision is flat from three to ten
 candidates when a floor is present, and `price_free` dominations hold at any
@@ -136,7 +241,13 @@ top two and identified six of the nine entries as dominated.
 
 Competition leaderboards rarely reach eight by construction: their rules fix
 quality at a threshold and compete on cost, so the surviving frontier is short
-and carries little curvature.
+and carries little curvature. On a three-point frontier the price is not
+rescuable from either side — a three-parameter fit through three points has no
+residual left, and a single triple gives one first difference with nothing to
+check it against — so the price stays `alpha/2`, the verdict stays
+`UNVERIFIED`, and what these tables do get is the envelope, the band and the
+reported jet. Four or more points on the marginal curve is where the rung
+reads and the jet prices.
 
 ## Usage examples
 
@@ -180,10 +291,43 @@ python -m ab.nn.select models.csv --rank --acc-col top1 --res-col latency_ms --r
 | `--rank` | order every model winner to loser (otherwise only the winner) |
 | `--out-csv FILE` | write the ranking to CSV (`-` for stdout) |
 | `--alpha 0.05` | coverage level for the rate interval |
-| `--boot N` | max bootstrap refits; skipped automatically once the frontier has 50+ points |
+| `--tiebreak interval\|support\|point` | which prices the tie inside the band is judged over (default `interval`) |
+| `--no-jet` | keep `alpha/2` even where the floor test fails, instead of `lambda* = s` |
+| `--boot N` | max bootstrap refits; skipped automatically once the frontier has 50+ points, and wherever the jet supplies the price |
 | `--no-color`, `--quiet` | plain text / suppress the report |
 
 Exit codes: `0` clean, `1` `UNVERIFIED` or `UNUSABLE`, `2` bad input.
 
 Scale: thousands of candidates are fine — they collapse to a frontier of a few
-hundred, and the fit runs on that. 20,000 models rank in about 1 second.
+hundred, and the fit runs on that. 20,000 models rank in about 1 second. The
+jet and the rung are O(n) in the frontier's length and the regret is one
+K-by-grid maximum on the matrix the rank spread already builds, so none of
+them is measurable in the total; on the runs where the jet supplies the price,
+400 bootstrap refits are skipped and the call gets faster.
+
+### Tests
+
+```bash
+python -m unittest discover -s test            # 77 tests, about 45 s
+python -m unittest test.test_select.TestPublishedCases -v
+```
+
+No dependency beyond `unittest`. `TestPublishedCases` is frozen on the
+examples above: its expected winners are what this implementation and the
+pre-band one both return, so a diff there is a change in the answer users
+see and has to be deliberate. The other groups are ordered by how little
+they assume — input, envelope, price-free, jet, rung, verdict, rate, score,
+band — so a failure localises.
+
+### Citation
+
+```bibtex
+@software{ignatov_nn_rank,
+  author  = {Ignatov, Dmitry and contributors},
+  title   = {AI Ranking: ranking of AI systems by the accuracy--resource
+             trade-off},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/ABrain-One/nn-rank}
+}
+```
