@@ -322,7 +322,7 @@ band — so a failure localises.
 ### Citation
 
 ```bibtex
-@software{ignatov_nn_rank,
+@software{ABrain.Rank,
   author  = {Ignatov, Dmitry},
   title   = {AI Ranking: ranking of AI systems by the accuracy--resource
              trade-off},
