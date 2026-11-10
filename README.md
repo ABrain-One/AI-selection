@@ -327,7 +327,7 @@ band — so a failure localises.
   title   = {AI Ranking: ranking of AI systems by the accuracy--resource
              trade-off},
   year    = {2026},
-  version = {0.1.0},
+  version = {1.0.0},
   url     = {https://github.com/ABrain-One/nn-rank}
 }
 ```
