@@ -46,6 +46,7 @@ from ab.nn.select import (                                   # noqa: E402
     minimax_band, normalise, read_jet, read_rung, render, select,
     sigma_matrix,
 )
+from ab.nn.select import score as score_at_price            # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -509,6 +510,75 @@ class TestScore(unittest.TestCase):
                   "regret_sup", "in_band", "note"):
             self.assertIn(c, rk.columns)
         self.assertEqual(list(rk["rank"]), list(range(1, len(rk) + 1)))
+
+
+class TestFixedPrice(unittest.TestCase):
+    """score(): charging models at a price derived earlier, not re-derived."""
+
+    def test_reproduces_select_at_its_own_price(self):
+        df = frontier(12, noise=0.05)
+        r = select(df, rank=True, boot=0)
+        s = score_at_price(df, r).set_index("name")
+        rk = r["ranking"].set_index("name")
+        for n in rk.index:
+            self.assertAlmostEqual(s.at[n, "score"], rk.at[n, "score"], places=12)
+            self.assertAlmostEqual(s.at[n, "sigma"], rk.at[n, "sigma"], places=12)
+
+    def test_a_new_model_is_scored_without_moving_the_price(self):
+        df = frontier(12)
+        r = select(df, rank=True, boot=0)
+        new = pd.DataFrame({"name": ["new"], "accuracy": [0.9],
+                            "resource": [3.0]})
+        s = score_at_price(new, r)
+        lam = r["rate"]["lambda"]
+        self.assertEqual(len(s), 1)
+        self.assertAlmostEqual(s.at[0, "score"], 1 / (1 + 0.1 * 3.0 ** lam),
+                               places=12)
+
+    def test_score_of_a_model_does_not_depend_on_the_others(self):
+        df = frontier(10)
+        alone = score_at_price(df.iloc[[4]], 0.4).at[0, "score"]
+        among = score_at_price(df, 0.4).set_index("name").at[df["name"].iloc[4], "score"]
+        self.assertAlmostEqual(alone, among, places=12)
+
+    def test_float_and_dict_price_agree_for_one_resource(self):
+        df = frontier(9)
+        a = score_at_price(df, 0.7)
+        b = score_at_price(df, {"resource": 0.7})
+        self.assertTrue(np.allclose(a["score"], b["score"]))
+        self.assertEqual(list(a["name"]), list(b["name"]))
+
+    def test_several_resources_follow_the_definition(self):
+        df = pd.DataFrame({"name": ["a", "b", "c"], "accuracy": [.7, .8, .9],
+                           "p1": [1., 2., 4.], "p2": [10., 5., 20.]})
+        s = score_at_price(df, {"p1": .5, "p2": .2}, res_col=["p1", "p2"])
+        s = s.set_index("name")
+        for n, acc, t1, t2 in df.itertuples(index=False):
+            want = 1 / (1 + (1 - acc) * t1 ** .5 * t2 ** .2)
+            self.assertAlmostEqual(s.at[n, "score"], want, places=12)
+        self.assertEqual(list(s.columns)[:5],
+                         ["score", "rank", "accuracy", "p1", "p2"])
+
+    def test_sorted_best_first_and_bad_rows_reported(self):
+        df = frontier(8)
+        df.loc[len(df)] = ["bad", 1.5, 2.0]
+        s = score_at_price(df, 0.5)
+        self.assertNotIn("bad", list(s["name"]))
+        self.assertTrue(any("bad" in p for p in s.attrs["problems"]))
+        self.assertTrue((s["score"].diff().dropna() <= 1e-12).all())
+        self.assertEqual(list(s["rank"]), list(range(1, len(s) + 1)))
+
+    def test_prices_it_cannot_use_raise(self):
+        df = frontier(6)
+        two = pd.DataFrame({"name": ["a", "b"], "accuracy": [.7, .8],
+                            "p1": [1., 2.], "p2": [3., 4.]})
+        for bad in (-0.1, float("nan"), {"other": 0.5}):
+            with self.assertRaises(ValueError):
+                score_at_price(df, bad)
+        with self.assertRaises(ValueError):
+            score_at_price(two, 0.5, res_col=["p1", "p2"])
+        with self.assertRaises(ValueError):
+            score_at_price(df, {"rate": None, "verdict": {}})
 
 
 # ---------------------------------------------------------- band, minimax --

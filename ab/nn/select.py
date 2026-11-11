@@ -1430,6 +1430,84 @@ def select(df, alpha=0.05, boot=400, seed=0, aicc_k="with-variance",
                          "spacing_ratio": rg.get("spacing_ratio"),
                          "reason": rg.get("reason")})
 
+
+# ========================================================== fixed price ====
+def score(df, price, name_col="name", acc_col="accuracy", res_col="resource"):
+    """Score models at a price that is already known, without deriving one.
+
+    select() derives the price from the candidates it is given, so a model
+    measured LATER -- a new candidate, a re-run -- cannot be scored by calling
+    select() again: the price would be re-derived with it in the set, and
+    scores are only comparable at the same price.  score() charges any frame
+    at a FIXED price instead:
+
+        r = select(reference, res_col="latency_ms")      # derive once
+        s = score(new_models, r, res_col="latency_ms")   # reuse it
+
+    price   a select() result (its per-axis price is used), a {axis: lambda}
+            dict, or a float when there is one resource.  An axis that has no
+            price is charged nothing, as in select().
+
+    RETURNS a DataFrame, best first, with the columns and the numbers that
+    select()'s ranking gives the same models at the same price: name, score,
+    rank, accuracy, each resource, sigma, eps_eff.  One model is enough.
+    Rows that fail validation are dropped and listed in .attrs["problems"];
+    the price used is in .attrs["price"].  Raises ValueError for missing
+    columns or a price it cannot use.
+    """
+    if isinstance(price, dict) and "rate" in price:          # select() result
+        rate = price.get("rate") or {}
+        price = rate.get("per_axis") or rate.get("lambda")
+        if price is None:
+            raise ValueError("the select() result carries no price; its "
+                             "verdict says why")
+    cands, axes, bad = normalise(df, name_col, acc_col, res_col)
+    if "eps" not in cands.columns:
+        raise ValueError("; ".join(bad) or "no usable input")
+    bad = [b for b in bad if b != "fewer than two usable candidates"]
+
+    if isinstance(price, dict):
+        lam = {str(a): float(v) for a, v in price.items() if v is not None}
+        unknown = sorted(set(lam) - set(axes))
+        if unknown:
+            raise ValueError(f"price given for {unknown}, but the resources "
+                             f"are {axes}")
+    elif len(axes) == 1:
+        lam = {axes[0]: float(price)}
+    else:
+        raise ValueError(f"{len(axes)} resources {axes} need a price each: "
+                         "give {axis: lambda}")
+    if not all(math.isfinite(v) and v >= 0 for v in lam.values()):
+        raise ValueError(f"a price must be a finite number >= 0, got {lam}")
+
+    out = cands.copy()
+    out["sigma"] = sigma_matrix(out, [lam], axes)[:, 0]
+    out["eps_eff"] = np.exp(-out["sigma"])
+    out["score"] = 1.0 / (1.0 + out["eps_eff"])
+    out = out.sort_values("sigma", ascending=False, kind="stable")
+    out = out.reset_index(drop=True)
+    out.insert(0, "rank", np.arange(1, len(out) + 1))
+    out = out[["name", "score", "rank", "accuracy"] + axes
+              + ["sigma", "eps_eff"]]
+    out.attrs["problems"] = bad
+    out.attrs["price"] = lam
+    return out
+
+
+def _parse_price(values, axes):
+    """--price on the command line: LAMBDA for one resource, AXIS=LAMBDA each
+    for several."""
+    if len(values) == 1 and "=" not in values[0]:
+        return float(values[0])
+    price = {}
+    for v in values:
+        axis, sep, lam = v.partition("=")
+        if not sep:
+            raise ValueError(f"--price {v}: with several resources write "
+                             f"AXIS=LAMBDA (axes: {', '.join(axes)})")
+        price[axis.strip()] = float(lam)
+    return price
+
 # ================================================================ render ====
 RED = "\033[1;31m"                        # problems only
 GRN = "\033[38;2;46;139;87m"              # #2E8B57, the answer
@@ -1796,6 +1874,10 @@ if __name__ == "__main__":
                          "alpha/2 there as before")
     ap.add_argument("--rank", action="store_true",
                     help="order ALL models winner to loser")
+    ap.add_argument("--price", action="append", metavar="LAMBDA|AXIS=LAMBDA",
+                    help="score at this FIXED price instead of deriving one, "
+                         "e.g. a price select() derived earlier: LAMBDA for "
+                         "one resource, AXIS=LAMBDA (repeat) for several")
     ap.add_argument("--out-csv", metavar="FILE",
                     help="write the ranking to CSV ('-' for stdout)")
     ap.add_argument("--no-color", action="store_true",
@@ -1828,6 +1910,26 @@ if __name__ == "__main__":
     except (OSError, ValueError, KeyError) as exc:
         print(f"input error: {exc}", file=sys.stderr)
         sys.exit(2)
+
+    if args.price:
+        axes = frame.attrs.get("axes") or ["resource"]
+        try:
+            scored = score(frame, _parse_price(args.price, axes), res_col=axes)
+        except ValueError as exc:
+            print(f"input error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not args.quiet:
+            fixed = ", ".join(f"{a} = {v:g}"
+                              for a, v in scored.attrs["price"].items())
+            print(f"SCORED AT A FIXED PRICE  lambda: {fixed}  "
+                  "(no price derived; higher score is better)")
+            for p in scored.attrs["problems"]:
+                print(_red(f"skipped {p}", not args.no_color))
+            print(scored.to_string(index=False))
+        if args.out_csv:
+            scored.to_csv(sys.stdout if args.out_csv == "-" else args.out_csv,
+                          index=False)
+        sys.exit(0)
 
     outcome = select(frame, alpha=args.alpha, boot=args.boot, seed=args.seed,
                      aicc_k=args.aicc_k,
