@@ -124,12 +124,35 @@ EXAMPLES OF USE
 USE AS A LIBRARY
 ================
 
+THE API IS TWO FUNCTIONS, and they are the two halves of one operation:
+DERIVE a price from candidates, or REUSE a price already derived.  Nothing
+else in this module is public.
+
+    select(df, ...) -> dict    derive the price from these candidates, test
+                               the floor, and rank them at it
+    score(df, price) -> frame  charge a frame at a price that is ALREADY
+                               known, and rank it at that
+
+Use select() when the candidates in hand define the trade-off.  Use score()
+when the price is settled and a model arrives later -- a new candidate, a
+re-run -- because calling select() again would re-derive the price with that
+model in the set, and scores are comparable only at the SAME price.  Both
+charge through charge(), so a model scored either way gets the same number.
+
+What select() does and score() does not: derive a price, test the error
+floor, report a verdict, an interval, a band or a regret.  There is nothing
+to verify at a price the caller supplies, so score() returns the ranking
+alone and no verdict.  score() needs ONE model; select() needs enough of a
+frontier to price.
+
     import pandas as pd
-    from example_general import select, render
+    from ab.nn.select import select, score, render
 
     df = pd.DataFrame({"name": [...], "accuracy": [...], "resource": [...]})
     result = select(df, alpha=0.05, rank=True)
     print(render(result, color=False))
+
+    later = score(new_models, result)        # same price, same scale
 
     result["verdict"]["level"]     # "USABLE" | "UNVERIFIED" | "UNUSABLE"
     result["verdict"]["p_value"]   # the floor F-test p, None if untestable
@@ -147,6 +170,12 @@ USE AS A LIBRARY
 
 `select()` takes a DataFrame and returns a dict of DataFrames and scalars.
 It prints nothing and raises nothing.
+
+`score(df, price)` takes a DataFrame and a price -- a select() result, a
+float for one resource, or a {axis: lambda} dict -- and returns a DataFrame,
+best first: name, score, rank, accuracy, each resource, sigma, eps_eff.  It
+prints nothing and raises ValueError only for a price or columns it cannot
+use.
 
 
 EXIT CODES
@@ -239,6 +268,10 @@ import pandas as pd
 from scipy.optimize import least_squares
 from scipy.stats import f as f_dist
 from scipy.stats import t as t_dist
+
+# The public API: derive a price (select) or reuse one (score).  Everything
+# else below is machinery one of those two calls, and is free to change.
+__all__ = ["select", "score"]
 
 MIN_FIT = 3         # 3 parameters need 3 points
 F_TESTABLE = 4      # the nested F-test needs n >= 4
@@ -906,6 +939,46 @@ def axis_price(df, axis, alpha=0.05, boot=400, seed=0, p_floor=0.05,
     return out
 
 
+# ================================================================ charge ====
+def charge(df, lam, axes=("resource",)):
+    """Charge candidates at a FIXED price and order them by what they cost.
+
+    The ONE place in this module where a price becomes a number.  Both public
+    entry points go through it, so they cannot drift apart:
+
+        select()   charges at the price it DERIVED from the candidates
+        score()    charges at a price the caller ALREADY has
+
+    which is why a model scored later by score() gets, to the bit, the number
+    select()'s ranking would have given it at that same price -- not because
+    the two agree, but because there is only one computation.
+
+        sigma   = -ln eps - sum_a lambda_a * ln t_a
+        eps_eff = exp(-sigma) = eps * prod_a t_a ** lambda_a
+        score   = 1 / (1 + eps_eff)
+
+    eps_eff is the error the model effectively costs once its resources are
+    charged at that price; score maps it into (0,1) so higher is better.  All
+    three are built from ONE model's own (eps, t) and the price alone, so
+    adding or removing other candidates cannot move them.  Only `rank` moves.
+
+    The sort is STABLE: candidates tied on sigma keep the order they came in,
+    so the same frame ranks the same way twice.
+
+    df    a normalise()d frame (it carries `eps` and the `x__<axis>` logs)
+    lam   a {axis: lambda} dict, or a float when there is one axis
+    RETURNS a copy, best first, with rank, sigma, eps_eff and score added.
+    """
+    out = df.copy()
+    out["sigma"] = sigma_matrix(out, [lam], list(axes))[:, 0]
+    out["eps_eff"] = np.exp(-out["sigma"])
+    out["score"] = 1.0 / (1.0 + out["eps_eff"])
+    out = out.sort_values("sigma", ascending=False, kind="stable")
+    out = out.reset_index(drop=True)
+    out.insert(0, "rank", np.arange(1, len(out) + 1))
+    return out
+
+
 # ================================================================ ranking ===
 def rank_frame(df, res, lam, grid, axes=("resource",), regret=None,
                band=None):
@@ -928,30 +1001,25 @@ def rank_frame(df, res, lam, grid, axes=("resource",), regret=None,
     dom_by = dict(zip(res["price_free"]["loser"], res["price_free"]["winner"]))
     dent = set(env["in_a_dent"]) if env is not None else set()
 
-    out = df.copy()
     if lam is None:
+        # No rate to charge at: envelope order, and no score to report.
+        out = df.copy()
         out["_tier"] = [0 if n in env_lo else 1 if n in dent else 2
                         for n in out["name"]]
         out["_ord"] = [env_lo.get(n, 0) for n in out["name"]]
-        out = out.sort_values(["_tier", "_ord", "eps"])
-        out["sigma"] = np.nan
+        out = out.sort_values(["_tier", "_ord", "eps"], kind="stable")
+        out = out.reset_index(drop=True)
+        out.insert(0, "rank", np.arange(1, len(out) + 1))
+        out["sigma"] = out["eps_eff"] = out["score"] = np.nan
         lo = hi = None
     else:
-        out["sigma"] = sigma_matrix(out, [lam], axes)[:, 0]
-        out = out.sort_values("sigma", ascending=False)
+        # score, sigma, eps_eff, the sort and `rank` all come from charge() --
+        # the same call score() makes, so the two cannot disagree.
+        out = charge(df, lam, axes)
         S = sigma_matrix(out, grid, axes)                # K x G
         ranks = (-S).argsort(axis=0).argsort(axis=0) + 1  # rank per column
         lo, hi = ranks.min(axis=1), ranks.max(axis=1)
 
-    out = out.reset_index(drop=True)
-    out.insert(0, "rank", np.arange(1, len(out) + 1))
-    # a score in (0,1), higher is better, that does NOT move when other
-    # candidates are added or removed: it is built from this model's own
-    # (eps, t) and the price alone.  eps_eff = eps * prod_a t_a^lambda_a is
-    # the error the model effectively costs at that price, so
-    # score = 1/(1 + eps_eff) is monotone in sigma.
-    out["eps_eff"] = np.exp(-out["sigma"]) if lam is not None else np.nan
-    out["score"] = 1.0 / (1.0 + out["eps_eff"])
     out["margin_to_next"] = out["sigma"].diff(-1) if lam is not None else np.nan
     out["rank_low"] = lo if lo is not None else np.nan
     out["rank_high"] = hi if hi is not None else np.nan
@@ -1450,7 +1518,8 @@ def score(df, price, name_col="name", acc_col="accuracy", res_col="resource"):
 
     RETURNS a DataFrame, best first, with the columns and the numbers that
     select()'s ranking gives the same models at the same price: name, score,
-    rank, accuracy, each resource, sigma, eps_eff.  One model is enough.
+    rank, accuracy, each resource, sigma, eps_eff.  Identical by construction,
+    not by agreement -- both go through charge().  One model is enough.
     Rows that fail validation are dropped and listed in .attrs["problems"];
     the price used is in .attrs["price"].  Raises ValueError for missing
     columns or a price it cannot use.
@@ -1480,13 +1549,8 @@ def score(df, price, name_col="name", acc_col="accuracy", res_col="resource"):
     if not all(math.isfinite(v) and v >= 0 for v in lam.values()):
         raise ValueError(f"a price must be a finite number >= 0, got {lam}")
 
-    out = cands.copy()
-    out["sigma"] = sigma_matrix(out, [lam], axes)[:, 0]
-    out["eps_eff"] = np.exp(-out["sigma"])
-    out["score"] = 1.0 / (1.0 + out["eps_eff"])
-    out = out.sort_values("sigma", ascending=False, kind="stable")
-    out = out.reset_index(drop=True)
-    out.insert(0, "rank", np.arange(1, len(out) + 1))
+    # the same call select()'s ranking makes, which is why the numbers match
+    out = charge(cands, lam, axes)
     out = out[["name", "score", "rank", "accuracy"] + axes
               + ["sigma", "eps_eff"]]
     out.attrs["problems"] = bad

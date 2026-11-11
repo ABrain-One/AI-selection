@@ -18,6 +18,8 @@ report prints in, so a failure localises:
   TestVerdict          USABLE / UNVERIFIED / UNUSABLE and the status map
   TestRate             the derived price, and which reading supplies it
   TestScore            the score's invariance to the candidate set
+  TestOneCharge        select() and score() share ONE charging kernel
+  TestFixedPrice       score(): charging at a price derived earlier
   TestBandMinimax      the band, the worst-case regret and the tie-break
   TestPublishedCases   FROZEN winners for the README's own examples
   TestRobustness       render() and select() never raise, on anything
@@ -41,11 +43,12 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ab.nn.select import (                                   # noqa: E402
-    JET_MIN_NODES, MIN_FIT, SPAN_MIN, _dd, dominations, envelope,
+    JET_MIN_NODES, MIN_FIT, SPAN_MIN, _dd, charge, dominations, envelope,
     fit_pow, frame_from_csv, frame_from_specs, jet_at, marginal_curve,
     minimax_band, normalise, read_jet, read_rung, render, select,
     sigma_matrix,
 )
+import ab.nn.select as select_mod                            # noqa: E402
 from ab.nn.select import score as score_at_price            # noqa: E402
 
 warnings.filterwarnings("ignore")
@@ -512,8 +515,77 @@ class TestScore(unittest.TestCase):
         self.assertEqual(list(rk["rank"]), list(range(1, len(rk) + 1)))
 
 
+class TestOneCharge(unittest.TestCase):
+    """select() and score() must not be two implementations of one formula.
+
+    The guarantee is structural, not numerical: both go through charge(), so
+    there is one place where a price becomes a number.  These tests fail if
+    someone re-inlines the arithmetic into either caller, which is exactly how
+    the two would silently drift apart.
+    """
+
+    def test_the_public_api_is_two_functions(self):
+        self.assertEqual(sorted(select_mod.__all__), ["score", "select"])
+
+    def test_both_callers_go_through_charge(self):
+        seen = []
+        real = select_mod.charge
+
+        def spy(df, lam, axes=("resource",)):
+            seen.append(dict(lam) if isinstance(lam, dict) else {"resource": lam})
+            return real(df, lam, axes)
+
+        select_mod.charge = spy
+        try:
+            df = frontier(10)
+            r = select(df, rank=True, boot=0)
+            self.assertTrue(seen, "select() computed a ranking without charge()")
+            seen.clear()
+            score_at_price(df, 0.4)
+            self.assertTrue(seen, "score() computed a ranking without charge()")
+        finally:
+            select_mod.charge = real
+
+    def test_charge_is_the_definition(self):
+        df, axes, _ = normalise(frontier(8))
+        out = charge(df, {"resource": 0.4}, axes).set_index("name")
+        for n in out.index:
+            eps = 1 - out.at[n, "accuracy"]
+            want = eps * out.at[n, "resource"] ** 0.4
+            self.assertAlmostEqual(out.at[n, "eps_eff"], want, places=12)
+            self.assertAlmostEqual(out.at[n, "score"], 1 / (1 + want), places=12)
+            self.assertAlmostEqual(out.at[n, "sigma"], -math.log(want), places=12)
+
+    def test_ties_keep_input_order(self):
+        # same eps and same resource: sigma is identical, so only a stable
+        # sort makes the ranking reproducible
+        df = pd.DataFrame({"name": ["x", "y", "z"], "accuracy": [.8, .8, .8],
+                           "resource": [2.0, 2.0, 2.0]})
+        self.assertEqual(list(score_at_price(df, 0.5)["name"]), ["x", "y", "z"])
+
+
+# ------------------------------------------------------------ fixed price --
 class TestFixedPrice(unittest.TestCase):
     """score(): charging models at a price derived earlier, not re-derived."""
+
+    def test_select_ranking_is_score_at_the_derived_price(self):
+        """Every column the two share, on every published-style case."""
+        for df, res_col in ((frontier(12, noise=0.05), "resource"),
+                            (pd.DataFrame(
+                                {"name": ["B0", "B1", "B2", "B3", "B4", "B5"],
+                                 "accuracy": [.771, .791, .801, .816, .829,
+                                              .836],
+                                 "flops_B": [.39, .70, 1.0, 1.8, 4.2, 9.9],
+                                 "params_M": [5.3, 7.8, 9.2, 12., 19., 30.]}),
+                             ["flops_B", "params_M"])):
+            r = select(df, res_col=res_col, rank=True, boot=0)
+            s = score_at_price(df, r, res_col=res_col)
+            rk = r["ranking"]
+            self.assertEqual(list(s["name"]), list(rk["name"]))
+            self.assertEqual(list(s["rank"]), list(rk["rank"]))
+            for col in ("score", "sigma", "eps_eff"):
+                self.assertTrue(np.allclose(s[col], rk[col], rtol=0, atol=1e-12),
+                                f"{col} differs between select() and score()")
 
     def test_reproduces_select_at_its_own_price(self):
         df = frontier(12, noise=0.05)

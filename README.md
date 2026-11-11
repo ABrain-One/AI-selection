@@ -32,6 +32,26 @@ pip install -r requirements.txt
 
 ## Use as an API
 
+The API is **two functions**, and they are the two halves of one operation:
+**derive** a price from candidates, or **reuse** a price already derived.
+
+| function | what it does | when |
+|---|---|---|
+| `select(df, ...)` | **derives** the price from the candidates given, tests the error floor, and ranks them at it | the models in hand define the trade-off |
+| `score(df, price)` | **reuses** a price that is already known, and ranks at that | the price is settled and a model arrives later |
+
+Nothing else is public. They share one charging kernel, so a model ranked
+either way gets the same `score`, `sigma` and `eps_eff` — identical by
+construction, not by agreement.
+
+What `select()` does and `score()` does **not**: derive a price, test the
+floor, and report a verdict, an interval, a band or a regret. There is
+nothing to verify at a price you supply, so `score()` returns the ranking
+alone. `score()` needs **one** model; `select()` needs enough of a frontier
+to price.
+
+### `select()` — derive a price
+
 ```python
 import pandas as pd
 from ab.nn.select import select
@@ -72,7 +92,7 @@ Quality that is not already in (0, 1) must be converted first. For PSNR in dB,
 `accuracy = 1 - 10 ** (-PSNR / 10)`. For top-1, mAP, mIoU, SSIM or F1, use the
 value as it is.
 
-### Output
+### Output of `select()`
 
 `select()` returns a dict. The three things most users need:
 
@@ -114,13 +134,13 @@ Two things it is *not* invariant to:
   comparable unless the unit is fixed;
 - **`lambda`** — only compare scores derived at the same price.
 
-### Scoring new models at a known price
+### `score()` — reuse a price
 
 `select()` derives the price from the models it is given, so a model measured
 later (a new candidate, a re-run) cannot be compared by calling `select()`
-again: the price would be re-derived with it in the set. `score()` charges any
-frame at a price fixed earlier instead, and returns the same `score`, `sigma`
-and `eps_eff` that `select()`'s ranking gives those models at that price:
+again: the price would be re-derived with it in the set, and scores are
+comparable **only at the same price**. `score()` charges any frame at a price
+fixed earlier instead:
 
 ```python
 from ab.nn.select import select, score
@@ -133,6 +153,17 @@ s = score(new_models, 1.04, res_col="latency_ms") # or give lambda directly
 The price is a `select()` result, a float for one resource, or a
 `{axis: lambda}` dict for several. On the command line: `--price 1.04`, or
 `--price p1=0.5 --price p2=0.2` for several resources.
+
+`score()` returns a `DataFrame`, best first: `name`, `score`, `rank`,
+`accuracy`, each resource, `sigma`, `eps_eff` — the same columns and the same
+numbers `select()`'s ranking carries at that price. Rows that fail validation
+are dropped and listed in `.attrs["problems"]`; the price used is in
+`.attrs["price"]`. It raises `ValueError` only for a price or columns it
+cannot use.
+
+No verdict is returned, and that is not an omission: a price you supplied is
+not a measurement this data can confirm or reject. Read the verdict from the
+`select()` run that **derived** the price, once.
 
 ### Read the verdict before the ranking
 
@@ -329,8 +360,8 @@ them is measurable in the total; on the runs where the jet supplies the price,
 ### Tests
 
 ```bash
-python -m unittest discover -s test            # 84 tests, about 45 s
-python -m unittest test.test_select.TestPublishedCases -v
+python -m unittest discover -s test            # 89 tests, about 40 s
+python -m unittest test.test.TestPublishedCases -v
 ```
 
 No dependency beyond `unittest`. `TestPublishedCases` is frozen on the
@@ -338,7 +369,9 @@ examples above: its expected winners are what this implementation and the
 pre-band one both return, so a diff there is a change in the answer users
 see and has to be deliberate. The other groups are ordered by how little
 they assume — input, envelope, price-free, jet, rung, verdict, rate, score,
-band — so a failure localises.
+band — so a failure localises. `TestOneCharge` guards the API itself: it
+fails if `select()` or `score()` ever computes a ranking without going
+through the shared charging kernel, which is how the two would drift apart.
 
 ### Citation
 
