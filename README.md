@@ -114,6 +114,26 @@ Two things it is *not* invariant to:
   comparable unless the unit is fixed;
 - **`lambda`** — only compare scores derived at the same price.
 
+### Scoring new models at a known price
+
+`select()` derives the price from the models it is given, so a model measured
+later (a new candidate, a re-run) cannot be compared by calling `select()`
+again: the price would be re-derived with it in the set. `score()` charges any
+frame at a price fixed earlier instead, and returns the same `score`, `sigma`
+and `eps_eff` that `select()`'s ranking gives those models at that price:
+
+```python
+from ab.nn.select import select, score
+
+r = select(reference, res_col="latency_ms")       # derive the price once
+s = score(new_models, r, res_col="latency_ms")    # reuse it: DataFrame, best first
+s = score(new_models, 1.04, res_col="latency_ms") # or give lambda directly
+```
+
+The price is a `select()` result, a float for one resource, or a
+`{axis: lambda}` dict for several. On the command line: `--price 1.04`, or
+`--price p1=0.5 --price p2=0.2` for several resources.
+
 ### Read the verdict before the ranking
 
 `verdict["level"]` says whether the ranking means anything. A clean run prints
@@ -289,6 +309,7 @@ python -m ab.nn.select models.csv --rank --acc-col top1 --res-col latency_ms --r
 | flag | effect |
 |---|---|
 | `--rank` | order every model winner to loser (otherwise only the winner) |
+| `--price LAMBDA` | score at a fixed price instead of deriving one; `--price AXIS=LAMBDA` per resource when there are several |
 | `--out-csv FILE` | write the ranking to CSV (`-` for stdout) |
 | `--alpha 0.05` | coverage level for the rate interval |
 | `--tiebreak interval\|support\|point` | which prices the tie inside the band is judged over (default `interval`) |
@@ -308,7 +329,7 @@ them is measurable in the total; on the runs where the jet supplies the price,
 ### Tests
 
 ```bash
-python -m unittest discover -s test            # 77 tests, about 45 s
+python -m unittest discover -s test            # 84 tests, about 45 s
 python -m unittest test.test_select.TestPublishedCases -v
 ```
 
