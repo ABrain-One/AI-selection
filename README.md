@@ -376,12 +376,13 @@ through the shared charging kernel, which is how the two would drift apart.
 ### Citation
 
 ```bibtex
-@software{ABrain.Rank,
-  author  = {Ignatov, Dmitry},
-  title   = {AI Ranking: ranking of AI systems by the accuracy--resource
-             trade-off},
-  year    = {2026},
-  version = {1.0.0},
-  url     = {https://github.com/ABrain-One/nn-rank}
+@misc{ABrain.Rank,
+  author       = {Ignatov, Dmitry},
+  title        = {A Frontier-Based Theory of Quality--Resource Trade-offs for {AI} Model Selection},
+  year         = {2026},
+  month        = Sep,
+  howpublished = {Preprint},
+  note         = {Preprint},
+  doi          = {10.2139/ssrn.7683960}
 }
 ```
