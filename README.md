@@ -375,6 +375,8 @@ through the shared charging kernel, which is how the two would drift apart.
 
 ### Citation
 
+If you find the NN-Rank project to be useful for your research, please consider citing an article about <a target='_blank' href='https://doi.org/10.2139/ssrn.7683960'>AI Model Selection</a>:
+
 ```bibtex
 @misc{ABrain.Rank,
   author       = {Ignatov, Dmitry},
