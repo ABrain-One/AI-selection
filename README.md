@@ -382,7 +382,6 @@ through the shared charging kernel, which is how the two would drift apart.
   year         = {2026},
   month        = Sep,
   howpublished = {Preprint},
-  note         = {Preprint},
   doi          = {10.2139/ssrn.7683960}
 }
 ```
