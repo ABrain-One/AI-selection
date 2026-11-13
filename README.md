@@ -379,11 +379,10 @@ If you find the NN-Rank project to be useful for your research, please consider 
 
 ```bibtex
 @misc{ABrain.Rank,
-  author       = {Ignatov, Dmitry},
-  title        = {A Frontier-Based Theory of Quality--Resource Trade-offs for {AI} Model Selection},
-  year         = {2026},
-  month        = Sep,
-  howpublished = {Preprint},
-  doi          = {10.2139/ssrn.7683960}
+    author = {Ignatov, Dmitry},
+	title = {A Frontier-Based Theory of Quality--Resource Trade-offs for {AI} Model Selection},
+	year = {2026},
+	howpublished = {Preprint, SSRN},
+	note = {\url{https://doi.org/10.2139/ssrn.7683960}. Software: \url{https://github.com/ABrain-One/nn-rank}}
 }
 ```
