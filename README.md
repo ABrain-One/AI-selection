@@ -389,7 +389,7 @@ If you find the NN-Rank project to be useful for your research, please consider 
 
 @misc{ABrain.Multi-Rank,
     author = {Ignatov, Dmitry},
-	title = {A Differential Theory of Quality–Resource Trade-offs for AI Model Selection: The Multiresource Frontier and the Minimax Price},
+	title = {A Differential Theory of Quality–Resource Trade-offs for AI Model Selection: The Multiresource Frontier and Its Minimax Price},
 	year = {2026},	
 	note = {Software: \url{https://github.com/ABrain-One/nn-rank}}
 }
